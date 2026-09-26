@@ -3,6 +3,7 @@ struct Parser {
     tokens: Vec<Token>,
     index: usize,
     next_type_variable: u32,
+    lambda_body_depth: usize,
 }
 
 impl Parser {
@@ -12,6 +13,7 @@ impl Parser {
             tokens: lex(source)?,
             index: 0,
             next_type_variable: 0,
+            lambda_body_depth: 0,
         })
     }
 
@@ -87,30 +89,20 @@ impl Parser {
                 tables.push(table);
             } else if self.eat_ident("let") {
                 let binding = self.parse_binding()?;
-                self.add_binding(&mut bindings, binding, false)?;
-            } else if self.eat_ident("def") {
-                // `def` marks a named definition as overloadable. The
-                // operator section syntax remains overloadable without it.
-                let binding = self.parse_binding()?;
-                self.add_binding(&mut bindings, binding, true)?;
+                self.add_binding(&mut bindings, binding)?;
             } else if matches!(self.current().kind, TokenKind::Ident(ref name) if name == "query") {
                 return self.error(
                     "'query' declarations were removed; use an ordinary binding with a query annotation",
                 );
             } else {
                 let binding = self.parse_definition()?;
-                self.add_binding(&mut bindings, binding, false)?;
+                self.add_binding(&mut bindings, binding)?;
             }
         }
         Ok(Program { tables, bindings })
     }
 
-    fn add_binding(
-        &self,
-        bindings: &mut Vec<Binding>,
-        binding: Binding,
-        allow_named_overload: bool,
-    ) -> Result<(), String> {
+    fn add_binding(&self, bindings: &mut Vec<Binding>, binding: Binding) -> Result<(), String> {
         let Some(index) = bindings
             .iter()
             .position(|existing| existing.name == binding.name)
@@ -118,8 +110,13 @@ impl Parser {
             bindings.push(binding);
             return Ok(());
         };
+        let existing = &bindings[index];
         let operator_overload = is_infix_operator(&binding.name);
-        if !operator_overload && !allow_named_overload {
+        let existing_cases_are_annotated = match &existing.expr {
+            Expr::Overloaded(cases) => cases.iter().all(|case| case.annotation.is_some()),
+            _ => existing.annotation.is_some(),
+        };
+        if !operator_overload && (!existing_cases_are_annotated || binding.annotation.is_none()) {
             return self.error(format!("duplicate binding '{}'", binding.name));
         }
 
@@ -181,7 +178,7 @@ impl Parser {
             None
         };
         self.expect_symbol("=")?;
-        let expr = self.parse_expr()?;
+        let expr = desugar_implicit_lambda(self.parse_expr()?);
         self.eat_symbol(";");
         Ok(Binding {
             name,
@@ -198,7 +195,7 @@ impl Parser {
             None
         };
         self.expect_symbol("=")?;
-        let expr = self.parse_expr()?;
+        let expr = desugar_implicit_lambda(self.parse_expr()?);
         self.eat_symbol(";");
         Ok(Binding {
             name,
@@ -446,7 +443,7 @@ impl Parser {
         if self.eat_ident("let") {
             let name = self.parse_binding_name()?;
             self.expect_symbol("=")?;
-            let value = self.parse_expr()?;
+            let value = desugar_implicit_lambda(self.parse_expr()?);
             if !self.eat_ident("in") {
                 return self.error("expected 'in' in let expression");
             }
@@ -475,7 +472,10 @@ impl Parser {
             self.index = saved;
             return Ok(None);
         }
-        let body = self.parse_expr()?;
+        self.lambda_body_depth += 1;
+        let body_result = self.parse_expr();
+        self.lambda_body_depth -= 1;
+        let body = body_result?;
         Ok(Some(Expr::Lambda {
             param,
             annotation,
@@ -563,7 +563,13 @@ impl Parser {
             if self.can_start_whitespace_argument() {
                 let argument = if matches!(self.current().kind, TokenKind::Symbol(ref value) if value == "{")
                 {
-                    self.parse_braced_projection()?
+                    desugar_implicit_lambda(self.parse_braced_projection()?)
+                } else if matches!(self.current().kind, TokenKind::Symbol(ref value) if value == "." || value == "(")
+                {
+                    // A bare field expression used as a whitespace argument
+                    // is an implicit row function. This also accepts the
+                    // parenthesized spelling used by query combinators.
+                    desugar_implicit_lambda(self.parse_expr()?)
                 } else {
                     self.parse_atom()?
                 };
@@ -596,13 +602,10 @@ impl Parser {
     }
 
     fn parse_argument(&mut self) -> Result<Expr, String> {
-        if matches!(self.current().kind, TokenKind::Symbol(ref value) if value == ".") {
-            return Ok(Expr::Predicate(self.parse_predicate()?));
-        }
         if matches!(self.current().kind, TokenKind::Symbol(ref value) if value == "{") {
-            return self.parse_braced_projection();
+            return Ok(desugar_implicit_lambda(self.parse_braced_projection()?));
         }
-        self.parse_expr()
+        Ok(desugar_implicit_lambda(self.parse_expr()?))
     }
 
     fn parse_atom(&mut self) -> Result<Expr, String> {
@@ -615,24 +618,10 @@ impl Parser {
         if matches!(self.current().kind, TokenKind::Ident(ref name) if name == "from") {
             return self.error("'from' source syntax was removed; use table \"schema\" \"name\"");
         }
-        if self.eat_ident("fn") {
-            let param = self.expect_ident()?;
-            let annotation = if self.eat_symbol(":") {
-                Some(self.parse_type()?)
-            } else {
-                None
-            };
-            self.expect_symbol("=>")?;
-            return Ok(Expr::Lambda {
-                param,
-                annotation,
-                body: Box::new(self.parse_expr()?),
-            });
-        }
         if self.eat_symbol("(") {
             let expression = self.parse_expr()?;
             self.expect_symbol(")")?;
-            return Ok(expression);
+            return Ok(desugar_implicit_lambda(expression));
         }
         if matches!(self.current().kind, TokenKind::Symbol(ref symbol) if symbol == "{") {
             return self.parse_braced_projection();
@@ -661,7 +650,10 @@ impl Parser {
         let aggregate = matches!(
             self.tokens.get(self.index + 3).map(|token| &token.kind),
             Some(TokenKind::Ident(_))
-        );
+        ) && !(self.lambda_body_depth > 0 && matches!(
+            self.tokens.get(self.index + 4).map(|token| &token.kind),
+            Some(TokenKind::Symbol(symbol)) if symbol == "."
+        ));
         if aggregate {
             Ok(Expr::AggregateProjection(self.parse_aggregate_fields()?))
         } else {
@@ -675,7 +667,7 @@ impl Parser {
         while !self.eat_symbol("}") {
             let alias = self.expect_ident()?;
             self.expect_symbol(":")?;
-            let field = self.parse_field_ref()?;
+            let field = self.parse_projection_field_ref()?;
             fields.push(SelectField { alias, field });
             if !self.eat_symbol(",")
                 && !matches!(self.current().kind, TokenKind::Symbol(ref s) if s == "}")
@@ -718,45 +710,18 @@ impl Parser {
         self.expect_ident()
     }
 
-    fn parse_predicate(&mut self) -> Result<Predicate, String> {
-        let field = self.parse_field_ref()?;
-        let op = match self.bump().kind {
-            TokenKind::Symbol(value) if is_infix_operator(&value) => CompareOp::Named(value),
-            _ => return self.error("expected comparison operator"),
-        };
-        Ok(Predicate {
-            field,
-            op,
-            value: self.parse_literal()?,
-        })
+    fn parse_projection_field_ref(&mut self) -> Result<String, String> {
+        if self.eat_symbol(".") {
+            return self.expect_ident();
+        }
+        // Explicit lambda projections may spell the source field as
+        // `row.field`; the row variable is structural and does not affect the
+        // selected SQL column.
+        let _row = self.expect_ident()?;
+        self.expect_symbol(".")?;
+        self.expect_ident()
     }
 
-    fn parse_literal(&mut self) -> Result<Literal, String> {
-        if self.eat_ident("date") {
-            return match self.bump().kind {
-                TokenKind::String(value) => Ok(Literal::Date(value)),
-                _ => self.error("date expects a string literal"),
-            };
-        }
-        if self.eat_ident("timestamp") {
-            return match self.bump().kind {
-                TokenKind::String(value) => Ok(Literal::Timestamp(value)),
-                _ => self.error("timestamp expects a string literal"),
-            };
-        }
-        match self.bump().kind {
-            TokenKind::String(value) => Ok(Literal::String(value)),
-            TokenKind::Number(value) if value.contains('.') => Ok(Literal::Float(value)),
-            TokenKind::Number(value) => value
-                .parse()
-                .map(Literal::Integer)
-                .map_err(|_| "invalid integer literal".to_owned()),
-            TokenKind::Ident(value) if value == "true" => Ok(Literal::Bool(true)),
-            TokenKind::Ident(value) if value == "false" => Ok(Literal::Bool(false)),
-            TokenKind::Ident(value) if value == "null" => Ok(Literal::Null),
-            _ => self.error("expected literal"),
-        }
-    }
 }
 
 fn is_infix_operator(operator: &str) -> bool {
@@ -770,3 +735,143 @@ fn is_infix_operator(operator: &str) -> bool {
         )
 }
 
+/// Elaborate the row-field shorthand into an ordinary function value.
+///
+/// A bare `.field` refers to the first row parameter. `that.field` refers to
+/// the second row parameter, so an expression containing it gets two nested
+/// lambdas. The parser keeps `Field` as a short-lived marker while parsing and
+/// removes it here; the rest of the compiler only has to deal with regular
+/// `Access` expressions.
+fn desugar_implicit_lambda(expr: Expr) -> Expr {
+    // Explicit lambdas establish their own scope. In particular, a field
+    // marker in an explicit lambda body must not capture an implicit row
+    // parameter introduced outside that lambda.
+    if matches!(expr, Expr::Lambda { .. }) {
+        return expr;
+    }
+    if matches!(expr, Expr::Projection(_)) {
+        return Expr::Lambda {
+            param: "row".to_owned(),
+            annotation: Some(implicit_row_type()),
+            body: Box::new(expr),
+        };
+    }
+    let (has_left, has_right) = implicit_field_markers(&expr);
+    if !has_left && !has_right {
+        return expr;
+    }
+
+    if has_right {
+        let left_param = "row_left".to_owned();
+        let right_param = "row_right".to_owned();
+        let body = rewrite_implicit_fields(expr, &left_param, &right_param);
+        Expr::Lambda {
+            param: left_param,
+            annotation: Some(implicit_row_type()),
+            body: Box::new(Expr::Lambda {
+                param: right_param,
+                annotation: Some(implicit_row_type()),
+                body: Box::new(body),
+            }),
+        }
+    } else {
+        let param = "row".to_owned();
+        Expr::Lambda {
+            param: param.clone(),
+            annotation: Some(implicit_row_type()),
+            body: Box::new(rewrite_implicit_fields(expr, &param, "that")),
+        }
+    }
+}
+
+fn implicit_row_type() -> Type {
+    Type::RowType(Box::new(RowExpr::Variable(0)))
+}
+
+fn implicit_field_markers(expr: &Expr) -> (bool, bool) {
+    match expr {
+        Expr::Field(_) => (true, false),
+        Expr::Access { target, .. } => {
+            let right = matches!(target.as_ref(), Expr::Var(name) if name == "that");
+            let (left, nested_right) = implicit_field_markers(target);
+            (left, right || nested_right)
+        }
+        Expr::Apply { function, argument }
+        | Expr::Binary {
+            left: function,
+            right: argument,
+            ..
+        } => {
+            let (left_a, right_a) = implicit_field_markers(function);
+            let (left_b, right_b) = implicit_field_markers(argument);
+            (left_a || left_b, right_a || right_b)
+        }
+        Expr::Let { value, body, .. } => {
+            let (left_a, right_a) = implicit_field_markers(value);
+            let (left_b, right_b) = implicit_field_markers(body);
+            (left_a || left_b, right_a || right_b)
+        }
+        Expr::Annotated { expr, .. } => implicit_field_markers(expr),
+        Expr::Overloaded(cases) => cases.iter().fold((false, false), |acc, case| {
+            let markers = implicit_field_markers(&case.expr);
+            (acc.0 || markers.0, acc.1 || markers.1)
+        }),
+        // Existing compatibility nodes contain already-resolved field names,
+        // so there is no marker to elaborate in them.
+        _ => (false, false),
+    }
+}
+
+fn rewrite_implicit_fields(expr: Expr, left_param: &str, right_param: &str) -> Expr {
+    match expr {
+        Expr::Field(field) => Expr::Access {
+            target: Box::new(Expr::Var(left_param.to_owned())),
+            field,
+        },
+        Expr::Access { target, field } => {
+            if matches!(target.as_ref(), Expr::Var(name) if name == "that") {
+                Expr::Access {
+                    target: Box::new(Expr::Var(right_param.to_owned())),
+                    field,
+                }
+            } else {
+                Expr::Access {
+                    target: Box::new(rewrite_implicit_fields(*target, left_param, right_param)),
+                    field,
+                }
+            }
+        }
+        Expr::Apply { function, argument } => Expr::Apply {
+            function: Box::new(rewrite_implicit_fields(*function, left_param, right_param)),
+            argument: Box::new(rewrite_implicit_fields(*argument, left_param, right_param)),
+        },
+        Expr::Binary { op, left, right } => Expr::Binary {
+            op,
+            left: Box::new(rewrite_implicit_fields(*left, left_param, right_param)),
+            right: Box::new(rewrite_implicit_fields(*right, left_param, right_param)),
+        },
+        Expr::Let { name, value, body } => Expr::Let {
+            name,
+            value: Box::new(rewrite_implicit_fields(*value, left_param, right_param)),
+            body: Box::new(rewrite_implicit_fields(*body, left_param, right_param)),
+        },
+        Expr::Annotated { expr, ty } => Expr::Annotated {
+            expr: Box::new(rewrite_implicit_fields(*expr, left_param, right_param)),
+            ty,
+        },
+        Expr::Overloaded(cases) => Expr::Overloaded(
+            cases
+                .into_iter()
+                .map(|mut case| {
+                    case.expr = Box::new(rewrite_implicit_fields(
+                        *case.expr,
+                        left_param,
+                        right_param,
+                    ));
+                    case
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}

@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::lang::Row;
+use sqlglot_rust::ast::Statement;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledQuery {
@@ -32,6 +33,6 @@ impl std::error::Error for CompileError {}
 
 #[derive(Clone)]
 pub(super) struct Relation {
-    pub(super) sql: String,
+    pub(super) statement: Box<Statement>,
     pub(super) row: Row,
 }

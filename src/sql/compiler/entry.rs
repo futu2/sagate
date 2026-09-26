@@ -8,6 +8,15 @@ use crate::lang::{
 use super::model::{CompileError, CompiledQuery, Relation};
 
 pub fn compile(program: &Program) -> Result<Vec<CompiledQuery>, String> {
+    compile_with_dialect(program, "ansi")
+}
+
+pub fn compile_with_dialect(
+    program: &Program,
+    dialect: &str,
+) -> Result<Vec<CompiledQuery>, String> {
+    let dialect = sqlglot_rust::Dialect::from_str(dialect)
+        .ok_or_else(|| format!("unknown SQL dialect '{dialect}'"))?;
     // Type checking validates all row labels before SQL generation.
     let known_rows = type_check(program).map_err(|error| error.to_string())?;
     let tables: HashMap<_, _> = program
@@ -33,12 +42,24 @@ pub fn compile(program: &Program) -> Result<Vec<CompiledQuery>, String> {
             relation.row = row.clone();
             result.push(CompiledQuery {
                 name: binding.name.clone(),
-                sql: relation.sql,
+                sql: render_sql(relation.statement, dialect),
                 row: relation.row,
             });
         }
     }
     Ok(result)
+}
+
+// The generator recursively walks nested subqueries. Keep that walk off the
+// small stack used by Rust's test and async worker threads.
+fn render_sql(statement: Box<sqlglot_rust::ast::Statement>, dialect: sqlglot_rust::Dialect) -> String {
+    std::thread::Builder::new()
+        .name("sagate-sql-render".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || sqlglot_rust::generate(&statement, dialect))
+        .expect("spawn SQL renderer")
+        .join()
+        .expect("SQL renderer panicked")
 }
 
 fn compile_expr(
@@ -305,4 +326,3 @@ fn flatten_apply(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     args.reverse();
     (current, args)
 }
-

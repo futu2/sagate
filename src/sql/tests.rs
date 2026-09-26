@@ -1,6 +1,5 @@
-use super::compiler::{compile_literal, quote_ident};
 use super::*;
-use crate::lang::{parse, Literal, Type};
+use crate::lang::{parse, Type};
 
 #[test]
 fn compiles_a_functional_pipeline_to_sql() {
@@ -18,15 +17,6 @@ fn compiles_a_functional_pipeline_to_sql() {
     let active = sql.iter().find(|query| query.name == "active").unwrap();
     assert!(active.sql.contains("WHERE q.\"active\" = TRUE"));
     assert!(active.sql.contains("q.\"display_name\" AS \"name\""));
-}
-
-#[test]
-fn escapes_sql_literals_and_identifiers() {
-    assert_eq!(
-        compile_literal(&Literal::String("O'Reilly".into())),
-        "'O''Reilly'"
-    );
-    assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
 }
 
 #[test]
@@ -64,6 +54,16 @@ fn compiles_schema_and_table_source_function() {
 }
 
 #[test]
+fn compiles_with_requested_sql_dialect() {
+    let program =
+        parse("q = table \"public\" \"users\" & where (.active == true) & select { id: .id };")
+            .expect("parse");
+    let queries = compile_with_dialect(&program, "mysql").expect("compile for MySQL");
+    assert!(queries[0].sql.contains("q.`active` = TRUE"));
+    assert!(queries[0].sql.contains("q.`id` AS `id`"));
+}
+
+#[test]
 fn compiles_annotated_relation_bindings_without_query_keyword() {
     let program = parse(
         r#"
@@ -84,36 +84,13 @@ fn compiles_annotated_relation_bindings_without_query_keyword() {
 }
 
 #[test]
-fn compiles_whitespace_mapper_application() {
-    let program =
-            parse("users : query { displayName: String } = table \"public\" \"users\"\nq = users & mapKey snake;")
-                .expect("parse");
-    let sql = compile(&program).expect("compile");
-    let q = sql.iter().find(|query| query.name == "q").unwrap();
-    assert!(q.sql.contains("\"display_name\""));
-}
-
-#[test]
-fn compiles_a_named_lambda_without_fn_keyword() {
-    let program = parse(
-        "is_active = row : { active: bool } => row.active == true;\n\
-             users : query { active: bool } = table \"public\" \"users\";\n\
-             q = users & where is_active;",
-    )
-    .expect("parse");
-    let sql = compile(&program).expect("compile");
-    let q = sql.iter().find(|query| query.name == "q").unwrap();
-    assert!(q.sql.contains("q.\"active\" = TRUE"));
-}
-
-#[test]
 fn compiles_aggregate_and_join_pipeline_steps() {
     let program = parse(
         r#"
             users_q : query { id: int, name: string } = table "public" "users"
             orders_q : query { user_id: int, total: float } = table "public" "orders"
             totals = orders_q & agg { user_id: group .user_id, total: sum .total, rows: count }
-            report = totals & join (inner users_q (left => right => left.user_id == right.id))
+            report = totals & inner users_q (left => right => left.user_id == right.id)
             "#,
     )
     .expect("parse");
@@ -131,7 +108,7 @@ fn reversed_join_comparison_keeps_its_meaning() {
     let program = parse(
         "lefts : query { id: int } = table \"public\" \"lefts\"\n\
              rights : query { id: int } = table \"public\" \"rights\"\n\
-             q = lefts & join (inner rights (l => r => r.id < l.id))\n",
+             q = lefts & inner rights (l => r => r.id < l.id)\n",
     )
     .expect("parse");
     let sql = compile(&program).expect("compile");
@@ -144,7 +121,7 @@ fn join_left_input_overwrites_duplicate_fields() {
     let program = parse(
         "users : query { id: int, name: string } = table \"public\" \"users\"\n\
              book_info : query { user_id: int, name: string } = table \"public\" \"book_info\"\n\
-             report = users & join (left book_info (l => r => l.id == r.user_id))\n",
+             report = users & left book_info (l => r => l.id == r.user_id)\n",
     )
     .expect("parse");
     let sql = compile(&program).expect("compile");

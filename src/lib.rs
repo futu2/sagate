@@ -6,4 +6,4 @@ pub use lang::{
     Literal, Mapper, MapperType, OverloadCase, Predicate, Program, Row, RowExpr, SelectField,
     Table, Type, TypeError,
 };
-pub use sql::{compile, CompiledQuery};
+pub use sql::{compile, compile_with_dialect, CompiledQuery};

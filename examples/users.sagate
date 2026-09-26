@@ -10,5 +10,7 @@ nullable_users = users
   & mapValue maybe
   & select { id: .id, name: .displayName }
 
-combined = merge users users
-  & select { id: .id, name: .displayName }
+user_names : query { id: int, name: string } = table "public" "user_names"
+
+combined = merge users user_names
+  & select { id: .id, name: .name }

@@ -61,7 +61,6 @@ inner = right_relation => predicate => left_relation => __joinInner right_relati
 left = right_relation => predicate => left_relation => __joinLeft right_relation predicate left_relation
 right = right_relation => predicate => left_relation => __joinRight right_relation predicate left_relation
 full = right_relation => predicate => left_relation => __joinFull right_relation predicate left_relation
-join = configuration => relation => configuration relation
 
 date : string -> date = value => __date value
 timestamp : string -> timestamp = value => __timestamp value

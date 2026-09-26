@@ -6,7 +6,17 @@ use std::{
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    let source = match args.get(1).map(String::as_str) {
+    let (dialect, input) = match args.as_slice() {
+        [_, flag, dialect, path] if flag == "--dialect" => (dialect.as_str(), Some(path.as_str())),
+        [_, flag, dialect] if flag == "--dialect" => (dialect.as_str(), None),
+        [_, path] => ("ansi", Some(path.as_str())),
+        [_] => ("ansi", None),
+        _ => {
+            eprintln!("usage: sagate [--dialect DIALECT] [PATH|-]");
+            return ExitCode::from(2);
+        }
+    };
+    let source = match input {
         None | Some("-") => {
             let mut input = String::new();
             if let Err(error) = io::stdin().read_to_string(&mut input) {
@@ -24,7 +34,8 @@ fn main() -> ExitCode {
         },
     };
 
-    match sagate::parse(&source).and_then(|program| sagate::compile(&program)) {
+    match sagate::parse(&source).and_then(|program| sagate::compile_with_dialect(&program, dialect))
+    {
         Ok(queries) => {
             for query in queries {
                 println!("-- query {}\n{};\n", query.name, query.sql);

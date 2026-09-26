@@ -452,14 +452,47 @@ fn predicate_value_from_expr(expr: &Expr) -> Result<Predicate, TypeError> {
         Expr::Access { field, .. } => field.clone(),
         _ => return Err(TypeError::new("predicate must compare a row field")),
     };
-    let Expr::Literal(value) = right else {
-        return Err(TypeError::new(
-            "predicate must compare a field with a literal",
-        ));
-    };
+    let value = predicate_literal(right).ok_or_else(|| {
+        TypeError::new("predicate must compare a field with a literal")
+    })?;
     Ok(Predicate {
         field,
         op,
-        value: value.clone(),
+        value,
     })
+}
+
+fn predicate_literal(expr: &Expr) -> Option<Literal> {
+    match expr {
+        Expr::Literal(value) => Some(value.clone()),
+        Expr::Apply { .. } => {
+            let (head, arguments) = flatten_apply(expr);
+            let head = match head {
+                Expr::Annotated { expr, .. } => expr.as_ref(),
+                head => head,
+            };
+            let Expr::Lambda { body, .. } = head else {
+                let Expr::Var(name) = head else { return None; };
+                let [Expr::Literal(Literal::String(value))] = arguments.as_slice() else { return None; };
+                return match name.as_str() {
+                    "date" | "__date" => Some(Literal::Date(value.clone())),
+                    "timestamp" | "__timestamp" => Some(Literal::Timestamp(value.clone())),
+                    _ => None,
+                };
+            };
+            let Expr::Apply { function, .. } = body.as_ref() else {
+                return None;
+            };
+            let Expr::Var(name) = function.as_ref() else {
+                return None;
+            };
+            let [Expr::Literal(Literal::String(value))] = arguments.as_slice() else { return None; };
+            match name.as_str() {
+                "__date" => Some(Literal::Date(value.clone())),
+                "__timestamp" => Some(Literal::Timestamp(value.clone())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }

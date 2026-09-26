@@ -82,9 +82,9 @@ merge    : forall r1:Row. forall r2:Row.
 ```
 
 Instantiation freshens value, row, key-mapper, and value-mapper variables in
-separate namespaces. `def` overloads are finite sets of HM schemes; an
-application tests each case with a cloned substitution state and commits the
-unique matching case.
+separate namespaces. Overloads are finite sets of HM schemes; an application
+tests each case with a cloned substitution state and commits the unique
+matching case.
 
 ## Mapping primitives
 
@@ -174,12 +174,11 @@ mapValue : valuemapper v -> query r -> query (mapvalue v r)
 merge    : query r -> query s -> query (merge r s)
 ```
 
-The SQL step layer extends the same model with grouping and joins. `join` and
-its configuration functions are ordinary curried prelude functions:
+The SQL step layer extends the same model with grouping and join mode
+functions:
 
 ```text
 agg       : (row r -> row s) -> query r -> query s
-join       : (query r -> (row l -> row r -> bool) -> query l -> query c) -> query l -> query c
 inner      : query r -> (row l -> row r -> bool) -> query l -> query c
 left       : query r -> (row l -> row r -> bool) -> query l -> query c
 right      : query r -> (row l -> row r -> bool) -> query l -> query c
@@ -214,11 +213,11 @@ finite overload sets with separate `int -> int -> int` and
 decidable and makes mixed numeric expressions fail without an implicit
 coercion rule.
 
-User code can define the same name more than once with `def`:
+User code can define the same name more than once with concrete signatures:
 
 ```sagate
-def choose : int -> int = x => x
-def choose : float -> float = x => x
+choose : int -> int = x => x
+choose : float -> float = x => x
 ```
 
 The checker resolves an overload at application time from the argument type.

@@ -125,11 +125,58 @@ fn first_class_prelude_function_can_be_bound_and_piped() {
 fn lambda_predicate_is_a_function_value() {
     let program = parse(
         "users : query { id: Int, active: Bool } = table \"public\" \"users\";\n\
-             q = where(fn row => row.active == true, users);",
+             q = where(row => row.active == true, users);",
     )
     .expect("parse");
     let rows = type_check(&program).expect("type check");
     assert_eq!(rows["q"].field("active").unwrap().ty, Type::Bool);
+}
+
+#[test]
+fn implicit_field_syntax_desugars_to_lambdas() {
+    let program = parse(
+        "is_active = (.active == true)\n\
+         projection = { id: .id }\n\
+         matches = (.user_id == that.owner_id)\n",
+    )
+    .expect("parse");
+
+    let is_active = program
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "is_active")
+        .unwrap();
+    assert!(matches!(is_active.expr, Expr::Lambda { .. }));
+
+    let projection = program
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "projection")
+        .unwrap();
+    assert!(matches!(projection.expr, Expr::Lambda { .. }));
+
+    let matches = program
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "matches")
+        .unwrap();
+    let Expr::Lambda { body, .. } = &matches.expr else {
+        panic!("expected the two-row shorthand to be a lambda")
+    };
+    assert!(matches!(body.as_ref(), Expr::Lambda { .. }));
+}
+
+#[test]
+fn implicit_two_row_join_syntax_type_checks() {
+    let program = parse(
+        "users : query { id: int } = table \"public\" \"users\"\n\
+         orders : query { owner_id: int } = table \"public\" \"orders\"\n\
+         report = orders & inner users (.owner_id == that.id)\n",
+    )
+    .expect("parse");
+    let row = type_check(&program).expect("type check")["report"].clone();
+    assert_eq!(row.field("id").unwrap().ty, Type::Int);
+    assert_eq!(row.field("owner_id").unwrap().ty, Type::Int);
 }
 
 #[test]
@@ -158,14 +205,14 @@ fn supports_annotated_bindings_and_whitespace_application() {
 fn supports_annotations_inside_lambda_parameters() {
     let program = parse(
         "users : query { active: Bool } = table \"public\" \"users\"\n\
-             q = where (fn row : { active: Bool } => row.active == true) (users);",
+             q = where (row : { active: Bool } => row.active == true) (users);",
     )
     .expect("parse");
     type_check(&program).expect("type check");
 }
 
 #[test]
-fn supports_lambda_without_fn_keyword() {
+fn supports_lambda_syntax() {
     let program = parse(
         "is_active = row : { active: bool } => row.active == true;\n\
              users : query { active: bool } = table \"public\" \"users\";\n\
@@ -173,6 +220,11 @@ fn supports_lambda_without_fn_keyword() {
     )
     .expect("parse");
     type_check(&program).expect("type check");
+}
+
+#[test]
+fn fn_lambda_syntax_is_rejected() {
+    assert!(parse("value = fn row => row\n").is_err());
 }
 
 #[test]
@@ -225,10 +277,10 @@ fn overloaded_arithmetic_selects_a_concrete_numeric_type() {
 }
 
 #[test]
-fn named_definitions_can_be_overloaded() {
+fn annotated_named_definitions_can_be_overloaded() {
     let program = parse(
-        "def choose : int -> int = value => value\n\
-             def choose : float -> float = value => value\n\
+        "choose : int -> int = value => value\n\
+             choose : float -> float = value => value\n\
              integer = choose 1\n\
              decimal = choose 1.0\n",
     )
@@ -236,8 +288,8 @@ fn named_definitions_can_be_overloaded() {
     type_check(&program).expect("type check");
 
     let bad = parse(
-        "def choose : int -> int = value => value\n\
-             def choose : float -> float = value => value\n\
+        "choose : int -> int = value => value\n\
+             choose : float -> float = value => value\n\
              invalid = choose true\n",
     )
     .expect("parse");
@@ -411,7 +463,7 @@ fn row_operator_kinds_reject_cross_axis_mappers() {
 fn row_polymorphic_definitions_preserve_and_validate_rows() {
     let program = parse(
         "users : query { id: int, active: bool } = table \"public\" \"users\"\n\
-             def keep : query r -> query r = relation => relation\n\
+             keep : query r -> query r = relation => relation\n\
              q = keep users\n",
     )
     .expect("parse");
@@ -420,7 +472,7 @@ fn row_polymorphic_definitions_preserve_and_validate_rows() {
     assert_eq!(rows["q"].field("active").unwrap().ty, Type::Bool);
 
     let bad = parse(
-        "def bad : query r -> query r = relation => true\n\
+        "bad : query r -> query r = relation => true\n\
              q = bad (table \"public\" \"users\")\n",
     )
     .expect("parse");
@@ -451,7 +503,7 @@ fn type_variables_are_distinct_inside_a_signature() {
 #[test]
 fn polymorphic_definitions_are_instantiated_per_use() {
     let program = parse(
-        "def identity2 : a -> a = value => value\n\
+        "identity2 : a -> a = value => value\n\
              number = identity2 1\n\
              flag = identity2 true\n",
     )
@@ -540,7 +592,7 @@ fn join_checks_key_types_and_outer_join_nullability() {
     let program = parse(
         "users : query { id: int } = table \"public\" \"users\"\n\
              orders : query { user_id: int, total: float } = table \"public\" \"orders\"\n\
-             report = users & join (left orders (l => r => l.id == r.user_id))\n",
+             report = users & left orders (l => r => l.id == r.user_id)\n",
     )
     .expect("parse");
     let row = &type_check(&program).expect("type check")["report"];
@@ -553,29 +605,10 @@ fn join_checks_key_types_and_outer_join_nullability() {
     let bad = parse(
         "users : query { id: int } = table \"public\" \"users\"\n\
              orders : query { user_id: string } = table \"public\" \"orders\"\n\
-             report = users & join (inner orders (l => r => l.id == r.user_id))\n",
+             report = users & inner orders (l => r => l.id == r.user_id)\n",
     )
     .expect("parse");
     assert!(type_check(&bad).is_err());
-}
-
-#[test]
-fn old_join_names_are_no_longer_available() {
-    let program = parse(
-        "users : query { id: int } = table \"public\" \"users\"\n\
-             orders : query { user_id: int } = table \"public\" \"orders\"\n\
-             report = users & joinInner orders (l => r => l.id == r.user_id)\n",
-    )
-    .expect("parse");
-    assert!(program
-        .bindings
-        .iter()
-        .any(|binding| binding.name == "join"));
-    assert!(!program
-        .bindings
-        .iter()
-        .any(|binding| binding.name == "joinInner"));
-    assert!(type_check(&program).is_err());
 }
 
 #[test]

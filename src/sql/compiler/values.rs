@@ -34,14 +34,42 @@ fn predicate_value_from_expr(expr: &Expr) -> Result<Predicate, String> {
         Expr::Access { field, .. } => field.clone(),
         _ => return Err("predicate must compare a row field".to_owned()),
     };
-    let Expr::Literal(value) = right else {
-        return Err("predicate must compare a field with a literal".to_owned());
-    };
+    let value = predicate_literal(right)
+        .ok_or_else(|| "predicate must compare a field with a literal".to_owned())?;
     Ok(Predicate {
         field,
         op,
-        value: value.clone(),
+        value,
     })
+}
+
+fn predicate_literal(expr: &Expr) -> Option<Literal> {
+    match expr {
+        Expr::Literal(value) => Some(value.clone()),
+        Expr::Apply { .. } => {
+            let (head, arguments) = flatten_apply(expr);
+            let head = match head {
+                Expr::Annotated { expr, .. } => expr.as_ref(),
+                head => head,
+            };
+            let name = match head {
+                Expr::Var(name) => name.as_str(),
+                Expr::Lambda { body, .. } => {
+                    let Expr::Apply { function, .. } = body.as_ref() else { return None; };
+                    let Expr::Var(name) = function.as_ref() else { return None; };
+                    name.as_str()
+                }
+                _ => return None,
+            };
+            let [Expr::Literal(Literal::String(value))] = arguments.as_slice() else { return None; };
+            match name {
+                "date" | "__date" => Some(Literal::Date(value.clone())),
+                "timestamp" | "__timestamp" => Some(Literal::Timestamp(value.clone())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn comparison_operator(operator: &str) -> Option<CompareOp> {
@@ -59,6 +87,10 @@ fn comparison_operator(operator: &str) -> Option<CompareOp> {
 fn projection_value(expr: &Expr) -> Result<&Vec<SelectField>, String> {
     match expr {
         Expr::Projection(fields) => Ok(fields),
+        Expr::Lambda { body, .. } => match body.as_ref() {
+            Expr::Projection(fields) => Ok(fields),
+            _ => Err("select expects a projection".to_owned()),
+        },
         _ => Err("select expects a projection".to_owned()),
     }
 }
@@ -226,7 +258,7 @@ fn compile_predicate(
     predicate: &Predicate,
     row: &Row,
     alias: &str,
-) -> Result<String, CompileError> {
+) -> Result<SqlExpr, CompileError> {
     if row.field(&predicate.field).is_none() && !row.columns.is_empty() {
         return Err(CompileError::new(format!(
             "unknown field '{}' in where",
@@ -234,47 +266,57 @@ fn compile_predicate(
         )));
     }
     if matches!(predicate.value, Literal::Null) {
-        let operator = match predicate.op {
-            CompareOp::Eq => "IS",
-            CompareOp::Ne => "IS NOT",
+        let negated = match predicate.op {
+            CompareOp::Eq => false,
+            CompareOp::Ne => true,
             _ => return Err(CompileError::new("null can only be compared with == or !=")),
         };
-        return Ok(format!(
-            "{alias}.{} {operator} NULL",
-            quote_ident(&predicate.field)
-        ));
+        return Ok(SqlExpr::IsNull {
+            expr: Box::new(sql_predicate_column(&predicate.field, alias)),
+            negated,
+        });
     }
-    Ok(format!(
-        "{alias}.{} {} {}",
-        quote_ident(&predicate.field),
-        compare_operator(&predicate.op)?,
-        compile_literal(&predicate.value)
-    ))
-}
-
-fn compare_operator(operator: &CompareOp) -> Result<&'static str, CompileError> {
-    Ok(match operator {
-        CompareOp::Named(_) => return Err(CompileError::new("unresolved comparison operator")),
-        CompareOp::Eq => "=",
-        CompareOp::Ne => "<>",
-        CompareOp::Lt => "<",
-        CompareOp::Le => "<=",
-        CompareOp::Gt => ">",
-        CompareOp::Ge => ">=",
+    Ok(SqlExpr::BinaryOp {
+        left: Box::new(sql_predicate_column(&predicate.field, alias)),
+        op: compare_operator(&predicate.op)?,
+        right: Box::new(sql_predicate_literal(&predicate.value)),
     })
 }
 
-pub(super) fn compile_literal(literal: &Literal) -> String {
+fn compare_operator(operator: &CompareOp) -> Result<BinaryOperator, CompileError> {
+    Ok(match operator {
+        CompareOp::Named(_) => return Err(CompileError::new("unresolved comparison operator")),
+        CompareOp::Eq => BinaryOperator::Eq,
+        CompareOp::Ne => BinaryOperator::Neq,
+        CompareOp::Lt => BinaryOperator::Lt,
+        CompareOp::Le => BinaryOperator::LtEq,
+        CompareOp::Gt => BinaryOperator::Gt,
+        CompareOp::Ge => BinaryOperator::GtEq,
+    })
+}
+
+fn sql_predicate_column(name: &str, table: &str) -> SqlExpr {
+    SqlExpr::Column {
+        table: Some(table.to_owned()),
+        name: name.to_owned(),
+        quote_style: QuoteStyle::DoubleQuote,
+        table_quote_style: if table == "q" {
+            QuoteStyle::None
+        } else {
+            QuoteStyle::DoubleQuote
+        },
+    }
+}
+
+fn sql_predicate_literal(literal: &Literal) -> SqlExpr {
     match literal {
-        Literal::String(value) => format!("'{}'", value.replace('\'', "''")),
-        Literal::Integer(value) => value.to_string(),
-        Literal::Float(value) => value.clone(),
-        Literal::Bool(true) => "TRUE".to_owned(),
-        Literal::Bool(false) => "FALSE".to_owned(),
-        Literal::Date(value) | Literal::Timestamp(value) => {
-            format!("'{}'", value.replace('\'', "''"))
+        Literal::String(value) | Literal::Date(value) | Literal::Timestamp(value) => {
+            SqlExpr::StringLiteral(value.clone())
         }
-        Literal::Null => "NULL".to_owned(),
+        Literal::Integer(value) => SqlExpr::Number(value.to_string()),
+        Literal::Float(value) => SqlExpr::Number(value.clone()),
+        Literal::Bool(value) => SqlExpr::Boolean(*value),
+        Literal::Null => SqlExpr::Null,
     }
 }
 

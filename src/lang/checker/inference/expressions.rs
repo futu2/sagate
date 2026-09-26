@@ -106,6 +106,24 @@ fn infer_expr_with_state(
                 .unwrap_or_else(|| state.fresh_type());
             let mut scoped = environment.clone();
             scoped.insert(param.clone(), parameter_ty.clone());
+            // A braced projection is parsed as `row => { ... }`. Its
+            // compatibility `Projection` node represents the record body,
+            // rather than another function layer.
+            if let Expr::Projection(fields) = body.as_ref() {
+                let output = Row::new(
+                    fields
+                        .iter()
+                        .map(|field| Column {
+                            name: field.alias.clone(),
+                            ty: Type::Any,
+                        })
+                        .collect(),
+                );
+                return Ok(Type::Function(
+                    Box::new(parameter_ty),
+                    Box::new(Type::Record(output)),
+                ));
+            }
             let body_ty = infer_expr_with_state(body, tables, &scoped, state)?;
             Ok(Type::Function(Box::new(parameter_ty), Box::new(body_ty)))
         }
@@ -258,7 +276,7 @@ fn infer_application(
                 };
                 unify_types(*input, type_from_bare_row_expr(input_row.clone()), state)?;
                 let visible_input = input_row.normalize().unwrap_or_default();
-                if let Expr::Projection(fields) = arguments[0] {
+                if let Some(fields) = projection_fields(arguments[0]) {
                     let selected = select_row(&visible_input, fields)?;
                     unify_types(*output, Type::Record(selected.clone()), state)?;
                     return Ok(Type::Relation(selected));
@@ -430,6 +448,17 @@ fn infer_application(
         other => Err(TypeError::new(format!(
             "cannot apply value of type {other}"
         ))),
+    }
+}
+
+fn projection_fields(expr: &Expr) -> Option<&Vec<SelectField>> {
+    match expr {
+        Expr::Projection(fields) => Some(fields),
+        Expr::Lambda { body, .. } => match body.as_ref() {
+            Expr::Projection(fields) => Some(fields),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
