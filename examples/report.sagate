@@ -1,0 +1,12 @@
+users : query { id: int, name: string } = table "public" "users"
+orders : query { user_id: int, total: float, created_at: timestamp } = table "public" "orders"
+
+recent_orders = orders
+  & where (.created_at >= timestamp "2026-01-01T00:00:00Z")
+
+totals = recent_orders
+  & agg { user_id: group .user_id, total: sum .total, order_count: count }
+
+report = totals
+  & join (inner users (left => right => left.user_id == right.id))
+  & select { user_id: .user_id, name: .name, total: .total, order_count: .order_count }

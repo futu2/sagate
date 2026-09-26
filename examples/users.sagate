@@ -1,0 +1,14 @@
+users : query { id: int, displayName: string, active: bool } =
+  table "public" "users"
+
+active_users = users
+  & where (.active == true)
+  & mapKey snake
+  & select { id: .id, name: .display_name }
+
+nullable_users = users
+  & mapValue maybe
+  & select { id: .id, name: .displayName }
+
+combined = merge users users
+  & select { id: .id, name: .displayName }

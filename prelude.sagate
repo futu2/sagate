@@ -1,0 +1,84 @@
+# Public language functions. The double-underscore names are the small
+# backend primitive layer used by the SQL compiler.
+# Repeated operator definitions are an explicit finite overload set. Numeric
+# operations intentionally keep int and float signatures separate.
+table : string -> string -> query r = schemaName => tableName => __table schemaName tableName
+
+_+_ : int -> int -> int = left => right => __add left right
+_+_ : float -> float -> float = left => right => __add left right
+_-_ : int -> int -> int = left => right => __sub left right
+_-_ : float -> float -> float = left => right => __sub left right
+_*_ : int -> int -> int = left => right => __mul left right
+_/_ : float -> float -> float = left => right => __div left right
+_%_ : int -> int -> int = left => right => __mod left right
+_==_ : int -> int -> bool = left => right => __eq left right
+_==_ : float -> float -> bool = left => right => __eq left right
+_==_ : string -> string -> bool = left => right => __eq left right
+_==_ : bool -> bool -> bool = left => right => __eq left right
+_==_ : date -> date -> bool = left => right => __eq left right
+_==_ : timestamp -> timestamp -> bool = left => right => __eq left right
+_!=_ : int -> int -> bool = left => right => __ne left right
+_!=_ : float -> float -> bool = left => right => __ne left right
+_!=_ : string -> string -> bool = left => right => __ne left right
+_!=_ : bool -> bool -> bool = left => right => __ne left right
+_!=_ : date -> date -> bool = left => right => __ne left right
+_!=_ : timestamp -> timestamp -> bool = left => right => __ne left right
+_<_ : int -> int -> bool = left => right => __lt left right
+_<_ : float -> float -> bool = left => right => __lt left right
+_<_ : string -> string -> bool = left => right => __lt left right
+_<_ : date -> date -> bool = left => right => __lt left right
+_<_ : timestamp -> timestamp -> bool = left => right => __lt left right
+_<=_ : int -> int -> bool = left => right => __le left right
+_<=_ : float -> float -> bool = left => right => __le left right
+_<=_ : string -> string -> bool = left => right => __le left right
+_<=_ : date -> date -> bool = left => right => __le left right
+_<=_ : timestamp -> timestamp -> bool = left => right => __le left right
+_>_ : int -> int -> bool = left => right => __gt left right
+_>_ : float -> float -> bool = left => right => __gt left right
+_>_ : string -> string -> bool = left => right => __gt left right
+_>_ : date -> date -> bool = left => right => __gt left right
+_>_ : timestamp -> timestamp -> bool = left => right => __gt left right
+_>=_ : int -> int -> bool = left => right => __ge left right
+_>=_ : float -> float -> bool = left => right => __ge left right
+_>=_ : string -> string -> bool = left => right => __ge left right
+_>=_ : date -> date -> bool = left => right => __ge left right
+_>=_ : timestamp -> timestamp -> bool = left => right => __ge left right
+_&&_ : bool -> bool -> bool = left => right => __and left right
+_||_ : bool -> bool -> bool = left => right => __or left right
+
+_&_ = value => function => function value
+_$_ = function => value => function value
+_>>>_ = first => second => value => second (first value)
+_<<<_ = second => first => value => second (first value)
+
+where : (row r -> bool) -> query r -> query r = predicate => relation => __where predicate relation
+select : (row r -> row s) -> query r -> query s = projection => relation => __select projection relation
+mapKey : keymapper m -> query r -> query (mapkey m r) = mapper => relation => __mapKey mapper relation
+mapValue : valuemapper m -> query r -> query (mapvalue m r) = mapper => relation => __mapValue mapper relation
+merge : query r -> query s -> query (merge r s) = older => newer => __merge older newer
+agg : (row r -> row s) -> query r -> query s = projection => relation => __agg projection relation
+inner = right_relation => predicate => left_relation => __joinInner right_relation predicate left_relation
+left = right_relation => predicate => left_relation => __joinLeft right_relation predicate left_relation
+right = right_relation => predicate => left_relation => __joinRight right_relation predicate left_relation
+full = right_relation => predicate => left_relation => __joinFull right_relation predicate left_relation
+join = configuration => relation => configuration relation
+
+date : string -> date = value => __date value
+timestamp : string -> timestamp = value => __timestamp value
+
+group : a -> group a = field => __group field
+count : a -> agg int = field => __count field
+sum : a -> agg a = field => __sum field
+avg : a -> agg float = field => __avg field
+min : a -> agg a = field => __min field
+max : a -> agg a = field => __max field
+
+id : a -> a = x => x
+identity : a -> a = x => x
+snake : keymapper = __snake
+kebab : keymapper = __kebab
+camel : keymapper = __camel
+prefix : string -> keymapper = value => __prefix value
+suffix : string -> keymapper = value => __suffix value
+maybe : valuemapper = __maybe
+list : valuemapper = __list
