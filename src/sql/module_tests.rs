@@ -768,3 +768,36 @@ fn repository_examples_compile_as_files() {
             .unwrap_or_else(|error| panic!("{example}: {error}"));
     }
 }
+
+/// Unicode names flow through import aliases, export aliases, and the SQL
+/// output unchanged: spellings compare exactly, with no normalization.
+#[test]
+fn unicode_names_flow_through_imports_and_exports() {
+    let project = Project::new("unicode-names");
+    project.write(
+        "models/データ.sagate",
+        "合計 : query { 名前 = string, 金額 = float } = table \"public\" \"orders\"\n\
+         \n\
+         export { 合計 as 総計 }\n",
+    );
+    project.write(
+        "report.sagate",
+        "import { 総計 as 注文 } from \"./models/データ.sagate\"\n\
+         \n\
+         report = 注文 & select { 名前 = .名前, 金額 = .金額 }\n",
+    );
+
+    let queries = project.compile("report.sagate").expect("compile report");
+    assert_eq!(queries.len(), 1, "got {:?}", queries);
+    let report = query(&queries, "report");
+    assert!(
+        report.sql.contains("q.\"名前\" AS \"名前\""),
+        "{}",
+        report.sql
+    );
+    assert!(
+        report.sql.contains("q.\"金額\" AS \"金額\""),
+        "{}",
+        report.sql
+    );
+}

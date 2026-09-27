@@ -272,3 +272,64 @@ fn compiles_computed_select_projections() {
     assert!(q.sql.contains("q.\"price\" * q.\"qty\" AS \"total\""));
     assert!(q.sql.contains("q.\"qty\" AS \"qty\""));
 }
+
+#[test]
+fn compiles_unicode_names_with_quoted_identifiers() {
+    let program = parse(
+        r#"
+            利用者 : query { 名前 = string, 年齢 = int } = table "public" "users"
+            一覧 = 利用者
+              & where (.年齢 >= 18)
+              & select { 名前 = .名前, 大人 = true }
+            "#,
+    )
+    .expect("parse");
+    let sql = compile(&program).expect("compile");
+    let query = sql
+        .iter()
+        .find(|query| query.name == "一覧")
+        .expect("Unicode binding name is reported");
+    assert!(query.sql.contains("q.\"年齢\" >= 18"), "{}", query.sql);
+    assert!(
+        query.sql.contains("q.\"名前\" AS \"名前\""),
+        "{}",
+        query.sql
+    );
+}
+
+#[test]
+fn compiles_unicode_table_and_schema_names() {
+    let program = parse(
+        "q : query { 名前 = string } = table \"公開\" \"利用者\" & select { 名前 = .名前 }\n",
+    )
+    .expect("parse");
+    let sql = compile(&program).expect("compile");
+    assert!(
+        sql[0].sql.contains("FROM \"公開\".\"利用者\""),
+        "{}",
+        sql[0].sql
+    );
+}
+
+#[test]
+fn unicode_field_survives_mapkey_snake_and_aliases() {
+    // snake/kebab/camel only rewrite ASCII case and separators; the Unicode
+    // label passes through untouched, and the projection still resolves.
+    let program = parse(
+        r#"
+            users : query { 名前 = string, firstName = string } = table "public" "users"
+            q = users
+              & mapKey snake
+              & select { 名前 = .名前, first_name = .first_name }
+            "#,
+    )
+    .expect("parse");
+    let sql = compile(&program).expect("compile");
+    let q = sql.iter().find(|query| query.name == "q").unwrap();
+    assert!(q.sql.contains("q.\"名前\" AS \"名前\""), "{}", q.sql);
+    assert!(
+        q.sql.contains("q.\"first_name\" AS \"first_name\""),
+        "{}",
+        q.sql
+    );
+}

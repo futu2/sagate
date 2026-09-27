@@ -43,6 +43,7 @@ name = "sagate"
 version = "0.1.0"
 dependencies = [
  "sqlglot-rust",
+ "unicode-ident",
 ]
 
 [[package]]

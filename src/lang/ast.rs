@@ -641,3 +641,37 @@ impl fmt::Display for TypeError {
 }
 
 impl std::error::Error for TypeError {}
+
+#[cfg(test)]
+mod mapper_tests {
+    use super::*;
+
+    #[test]
+    fn snake_kebab_and_camel_apply_ascii_rules_only() {
+        // ASCII case and separators transform as before.
+        assert_eq!(Mapper::Snake.map_key("firstName"), "first_name");
+        assert_eq!(Mapper::Kebab.map_key("firstName"), "first-name");
+        assert_eq!(Mapper::Camel.map_key("first_name"), "firstName");
+        // Non-ASCII characters pass through unchanged, even around ASCII
+        // separators, and no Unicode normalization is applied.
+        assert_eq!(Mapper::Snake.map_key("caféId"), "café_id");
+        assert_eq!(Mapper::Kebab.map_key("caféId"), "café-id");
+        assert_eq!(Mapper::Camel.map_key("café_name"), "caféName");
+        assert_eq!(Mapper::Camel.map_key("ελληνικά_όνομα"), "ελληνικάόνομα");
+        assert_eq!(Mapper::Snake.map_key("名前"), "名前");
+        assert_eq!(Mapper::Snake.map_key("ﬁle"), "ﬁle");
+    }
+
+    #[test]
+    fn identity_prefix_and_suffix_keep_unicode_text_verbatim() {
+        assert_eq!(Mapper::Identity.map_key("名前"), "名前");
+        assert_eq!(
+            Mapper::Prefix("tbl_".to_owned()).map_key("名前"),
+            "tbl_名前"
+        );
+        assert_eq!(
+            Mapper::Suffix("_tmp".to_owned()).map_key("名前"),
+            "名前_tmp"
+        );
+    }
+}

@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 sqlglot-rust = "0.10.30"
+unicode-ident = "1"
 
 [lib]
 path = "src/lib.rs"

@@ -25,6 +25,102 @@ fn sql_templates_require_a_function_signature() {
 }
 
 #[test]
+fn unicode_string_literals_preserve_their_contents() {
+    let program = parse("value = \"你好\"\n").expect("parse");
+    let binding = program
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "value")
+        .expect("value binding");
+    assert!(matches!(
+        &binding.expr,
+        Expr::Literal(Literal::String(value)) if value == "你好"
+    ));
+}
+
+#[test]
+fn non_xid_source_characters_are_reported_without_panicking() {
+    let error = parse("value 🎉 = 1\n").expect_err("emoji is not an identifier character");
+    assert!(error.contains("unsupported character"), "{error}");
+}
+
+#[test]
+fn unicode_binding_names_are_preserved_exactly() {
+    let program = parse("café = 1\n你好世界 = 2\nμ_変数 = 3\n").expect("parse");
+    let names: Vec<&str> = program
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert!(names.contains(&"café"), "{names:?}");
+    assert!(names.contains(&"你好世界"), "{names:?}");
+    assert!(names.contains(&"μ_変数"), "{names:?}");
+}
+
+#[test]
+fn unicode_lambda_parameters_bind_names() {
+    let program = parse("increment : int -> int = مقدار => مقدار + 1\n").expect("parse");
+    let binding = program
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "increment")
+        .expect("increment binding");
+    assert!(matches!(
+        &binding.expr,
+        Expr::Lambda { param, .. } if param == "مقدار"
+    ));
+    type_check(&program).expect("type check");
+}
+
+#[test]
+fn unicode_row_fields_and_field_access_parse() {
+    let program = parse(
+        "users : query { 名前 = string } = table \"public\" \"users\"\n\
+             q = users & select { 名前 = .名前 }\n",
+    )
+    .expect("parse");
+    let rows = type_check(&program).expect("type check");
+    assert_eq!(rows["q"].field("名前").unwrap().ty, Type::String);
+}
+
+#[test]
+fn combining_marks_continue_identifiers() {
+    // U+0301 is an XID_Continue combining mark, so it extends the name.
+    let name = "cafe\u{301}";
+    let program = parse(&format!("{name} = 1\n")).expect("parse");
+    let binding = program
+        .bindings
+        .iter()
+        .find(|binding| binding.name == name)
+        .expect("decomposed binding");
+    assert_eq!(binding.name, name);
+}
+
+#[test]
+fn canonically_equivalent_spellings_remain_distinct() {
+    // Composed U+00E9 and decomposed e + U+0301 are two different names:
+    // identity is the exact source spelling, with no normalization. A
+    // successful parse proves distinctness because same-named bindings
+    // report a duplicate error.
+    let composed = "caf\u{e9}";
+    let decomposed = "cafe\u{301}";
+    let program = parse(&format!("{composed} = 1\n{decomposed} = 2\n")).expect("parse");
+    let names: Vec<&str> = program
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert!(names.contains(&composed), "{names:?}");
+    assert!(names.contains(&decomposed), "{names:?}");
+}
+
+#[test]
+fn unicode_lowercase_type_variables_are_scoped_to_signatures() {
+    let program = parse("identity : α -> α = x => x\napplied = identity 1\n").expect("parse");
+    type_check(&program).expect("type check");
+}
+
+#[test]
 fn parses_forward_application_as_an_ordinary_infix_application() {
     let program = parse(
         r#"

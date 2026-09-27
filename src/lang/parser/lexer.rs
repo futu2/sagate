@@ -33,13 +33,20 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             }
             continue;
         }
-        if byte.is_ascii_alphabetic() || byte == b'_' {
+        // Identifiers accept Unicode spellings under the XID rules: an
+        // XID_Start character (or `_`) opens the name and XID_Continue
+        // characters (or `_`) extend it. The index stays a byte offset so
+        // token locations keep their meaning.
+        let current = source[index..].chars().next().expect("index is on a char boundary");
+        if unicode_ident::is_xid_start(current) || current == '_' {
             let start = index;
-            index += 1;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
-            {
-                index += 1;
+            index += current.len_utf8();
+            while let Some(character) = source[index..].chars().next() {
+                if unicode_ident::is_xid_continue(character) || character == '_' {
+                    index += character.len_utf8();
+                } else {
+                    break;
+                }
             }
             tokens.push(Token {
                 kind: TokenKind::Ident(source[start..index].to_owned()),
@@ -47,7 +54,7 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             });
             continue;
         }
-        if byte.is_ascii_digit() {
+        if current.is_ascii_digit() {
             let start = index;
             index += 1;
             while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
@@ -60,26 +67,32 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             continue;
         }
         if byte == b'"' || byte == b'\'' {
-            let quote = byte;
+            let quote = byte as char;
             let start = index;
             index += 1;
             let mut value = String::new();
             let mut closed = false;
             while index < bytes.len() {
-                match bytes[index] {
-                    b'\\' if index + 1 < bytes.len() => {
-                        index += 1;
-                        value.push(bytes[index] as char);
-                        index += 1;
+                let Some(current) = source[index..].chars().next() else {
+                    break;
+                };
+                match current {
+                    '\\' => {
+                        index += current.len_utf8();
+                        let Some(escaped) = source[index..].chars().next() else {
+                            break;
+                        };
+                        value.push(escaped);
+                        index += escaped.len_utf8();
                     }
                     current if current == quote => {
-                        index += 1;
+                        index += current.len_utf8();
                         closed = true;
                         break;
                     }
                     current => {
-                        value.push(current as char);
-                        index += 1;
+                        value.push(current);
+                        index += current.len_utf8();
                     }
                 }
             }
@@ -92,8 +105,14 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             });
             continue;
         }
+        if !byte.is_ascii() {
+            return Err(format!("unsupported character '{current}' at byte {index}"));
+        }
         let start = index;
-        let two = if index + 1 < bytes.len() {
+        // The current byte is ASCII here, so the two-character lookahead is
+        // boundary-safe whenever the next byte is ASCII too; a multi-byte
+        // character after an operator byte just ends the symbol.
+        let two = if index + 1 < bytes.len() && bytes[index + 1].is_ascii() {
             &source[index..index + 2]
         } else {
             ""
@@ -148,4 +167,3 @@ fn is_operator_byte(byte: u8) -> bool {
             | b'~'
     )
 }
-

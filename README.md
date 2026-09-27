@@ -59,6 +59,20 @@ lambda syntax; applied lambdas are beta-reduced when their result is a SQL
 relation, while arbitrary value-producing lambdas remain language-level
 Lambda expressions use the `x => ...` syntax.
 
+### Identifiers
+
+Identifiers follow the Unicode XID rules: a name starts with an XID_Start
+character or `_` and continues with XID_Continue characters or `_`. Binding
+names, lambda parameters, row fields, aliases, and module names therefore
+accept non-Latin scripts (`café`, `名前`, `مقدار`) alongside ASCII. Identifiers
+are case-sensitive and compare by their exact source spelling: canonically
+equivalent spellings — such as composed `é` and decomposed `e` + U+0301 — are
+distinct names, and no normalization is applied anywhere. String literals keep
+their exact contents. Keywords, type spellings, and operators stay ASCII
+punctuation, characters outside the XID rules (such as emoji) are lexer
+errors, and the `snake`, `kebab`, and `camel` key mappers transform only ASCII
+case and separators, leaving non-ASCII text unchanged.
+
 Infix operators are ordinary function names written between underscores, as
 in Agda. The section name and infix spelling use the same function:
 
