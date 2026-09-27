@@ -1,25 +1,12 @@
 use sqlglot_rust::ast::{
-    FromClause, JoinClause, JoinType, SelectItem, SelectStatement, Statement, TableRef,
+    Cte, FromClause, JoinClause, JoinType, SelectItem, SelectStatement, Statement, TableRef,
     TableSource,
 };
 
-fn compile_table(name: &str, tables: &HashMap<&str, &Row>) -> Result<Relation, CompileError> {
-    let row = tables
-        .get(name)
-        .ok_or_else(|| CompileError::new(format!("unknown table '{name}'")))?;
-    let fields = row
-        .columns
-        .iter()
-        .map(|column| select_expr(sql_column(&column.name, None), None))
-        .collect();
-    Ok(Relation {
-        statement: Box::new(select_statement(fields, table_source(name, None), vec![], None, vec![])),
-        row: (*row).clone(),
-    })
-}
 
 fn compile_table_path(schema: &str, name: &str) -> Result<Relation, String> {
     Ok(Relation {
+        ctes: vec![],
         statement: Box::new(select_statement(
             vec![SelectItem::Wildcard],
             table_source(name, Some(schema)),
@@ -31,45 +18,157 @@ fn compile_table_path(schema: &str, name: &str) -> Result<Relation, String> {
     })
 }
 
-fn compile_where(inner: Relation, predicate: &Predicate) -> Result<Relation, CompileError> {
-    let condition = compile_predicate(predicate, &inner.row, "q")?;
+fn fresh_cte(prefix: &str, counter: &mut u32) -> String {
+    let name = format!("{prefix}{counter}");
+    *counter += 1;
+    name
+}
+
+fn cte(name: &str, query: Box<Statement>) -> Cte {
+    Cte {
+        name: name.to_owned(),
+        name_quote_style: QuoteStyle::DoubleQuote,
+        columns: vec![],
+        query,
+        materialized: None,
+        recursive: false,
+    }
+}
+
+/// A pipeline step lifts its input relation into a CTE and reads it back
+/// through a plain table source under the step's row scope alias, so a
+/// pipeline compiles to one flat `WITH` chain instead of nested subqueries.
+fn cte_source(name: &str, alias: &str) -> TableSource {
+    TableSource::Table(TableRef {
+        catalog: None,
+        schema: None,
+        name: name.to_owned(),
+        alias: Some(alias.to_owned()),
+        temporal: None,
+        name_quote_style: QuoteStyle::DoubleQuote,
+        alias_quote_style: QuoteStyle::None,
+    })
+}
+
+fn compile_where(
+    inner: Relation,
+    condition: SqlExpr,
+    counter: &mut u32,
+) -> Result<Relation, CompileError> {
+    let Relation {
+        mut ctes,
+        statement,
+        row,
+    } = inner;
+    let name = fresh_cte("q", counter);
+    ctes.push(cte(&name, statement));
     Ok(Relation {
+        ctes,
         statement: Box::new(select_statement(
             vec![SelectItem::Wildcard],
-            subquery_source(inner.statement.clone(), "q"),
+            cte_source(&name, "q"),
             vec![],
             Some(condition),
             vec![],
         )),
-        row: inner.row,
+        row,
     })
 }
 
-fn compile_select(inner: Relation, fields: &[SelectField]) -> Result<Relation, CompileError> {
+fn compile_order(
+    inner: Relation,
+    items: Vec<OrderByItem>,
+    counter: &mut u32,
+) -> Result<Relation, CompileError> {
+    let Relation {
+        mut ctes,
+        statement,
+        row,
+    } = inner;
+    let name = fresh_cte("q", counter);
+    ctes.push(cte(&name, statement));
+    let mut outer = Box::new(select_statement(
+        vec![SelectItem::Wildcard],
+        cte_source(&name, "q"),
+        vec![],
+        None,
+        vec![],
+    ));
+    if let Statement::Select(select) = outer.as_mut() {
+        select.order_by = items;
+    }
+    Ok(Relation {
+        ctes,
+        statement: outer,
+        row,
+    })
+}
+
+fn compile_limit(inner: Relation, count: i64, counter: &mut u32) -> Result<Relation, CompileError> {
+    let Relation {
+        mut ctes,
+        statement,
+        row,
+    } = inner;
+    let name = fresh_cte("q", counter);
+    ctes.push(cte(&name, statement));
+    let mut outer = Box::new(select_statement(
+        vec![SelectItem::Wildcard],
+        cte_source(&name, "q"),
+        vec![],
+        None,
+        vec![],
+    ));
+    if let Statement::Select(select) = outer.as_mut() {
+        select.limit = Some(SqlExpr::Number(count.to_string()));
+    }
+    Ok(Relation {
+        ctes,
+        statement: outer,
+        row,
+    })
+}
+
+fn compile_select(
+    inner: Relation,
+    param: &str,
+    fields: &[(String, Expr)],
+    definitions: &HashMap<String, &Expr>,
+    counter: &mut u32,
+) -> Result<Relation, CompileError> {
+    let Relation {
+        mut ctes,
+        statement,
+        row: inner_row,
+    } = inner;
+    let scope = RowScope {
+        params: vec![(param.to_owned(), "q", &inner_row)],
+    };
     let mut selections = Vec::new();
     let mut selection_positions = HashMap::new();
     let mut columns = Vec::new();
-    for field in fields {
-        let column = inner.row.field(&field.field);
-        let selection = select_expr(
-            sql_column(&field.field, Some("q")),
-            Some(field.alias.clone()),
-        );
-        if let Some(index) = selection_positions.get(&field.alias).copied() {
+    for (name, value) in fields {
+        let sql =
+            lower_row_expression(value, &scope, definitions).map_err(CompileError::new)?;
+        let selection = select_expr(sql, Some(name.clone()));
+        if let Some(index) = selection_positions.get(name).copied() {
             selections[index] = selection;
         } else {
-            selection_positions.insert(field.alias.clone(), selections.len());
+            selection_positions.insert(name.clone(), selections.len());
             selections.push(selection);
         }
         columns.push(Column {
-            name: field.alias.clone(),
-            ty: column.map_or(crate::lang::Type::Any, |column| column.ty.clone()),
+            name: name.clone(),
+            ty: projection_field_type(value, &inner_row),
         });
     }
+    let name = fresh_cte("q", counter);
+    ctes.push(cte(&name, statement));
     Ok(Relation {
+        ctes,
         statement: Box::new(select_statement(
             selections,
-            subquery_source(inner.statement, "q"),
+            cte_source(&name, "q"),
             vec![],
             None,
             vec![],
@@ -78,10 +177,32 @@ fn compile_select(inner: Relation, fields: &[SelectField]) -> Result<Relation, C
     })
 }
 
-fn compile_aggregate(inner: Relation, fields: &[AggregateField]) -> Result<Relation, CompileError> {
+/// The static type of a projection value. Field references keep their column
+/// type; computed values are refined by the checker's known rows for the
+/// final binding, so `Any` is enough for mid-chain field-existence checks.
+fn projection_field_type(value: &Expr, row: &Row) -> crate::lang::Type {
+    match value {
+        Expr::Field(field) | Expr::Access { field, .. } => row
+            .field(field)
+            .map_or(crate::lang::Type::Any, |column| column.ty.clone()),
+        Expr::Lambda { body, .. } => projection_field_type(body, row),
+        _ => crate::lang::Type::Any,
+    }
+}
+
+fn compile_aggregate(
+    inner: Relation,
+    fields: &[AggregateField],
+    counter: &mut u32,
+) -> Result<Relation, CompileError> {
     if fields.is_empty() {
         return Err(CompileError::new("agg expects at least one field"));
     }
+    let Relation {
+        mut ctes,
+        statement,
+        row: inner_row,
+    } = inner;
     let mut selections = Vec::with_capacity(fields.len());
     let mut groups = Vec::new();
     let mut columns = Vec::with_capacity(fields.len());
@@ -125,7 +246,7 @@ fn compile_aggregate(inner: Relation, fields: &[AggregateField]) -> Result<Relat
             AggregateOp::Group | AggregateOp::Sum | AggregateOp::Min | AggregateOp::Max => field
                 .field
                 .as_deref()
-                .and_then(|name| inner.row.field(name))
+                .and_then(|name| inner_row.field(name))
                 .map_or(crate::lang::Type::Any, |column| column.ty.clone()),
         };
         columns.push(Column {
@@ -133,10 +254,13 @@ fn compile_aggregate(inner: Relation, fields: &[AggregateField]) -> Result<Relat
             ty,
         });
     }
+    let name = fresh_cte("q", counter);
+    ctes.push(cte(&name, statement));
     Ok(Relation {
+        ctes,
         statement: Box::new(select_statement(
             selections,
-            subquery_source(inner.statement, "q"),
+            cte_source(&name, "q"),
             vec![],
             None,
             groups,
@@ -145,31 +269,13 @@ fn compile_aggregate(inner: Relation, fields: &[AggregateField]) -> Result<Relat
     })
 }
 
-#[derive(Clone)]
-struct JoinPredicate {
-    left_field: String,
-    right_field: String,
-    op: CompareOp,
-}
-
 fn compile_join(
     left: Relation,
     right: Relation,
-    predicate: &JoinPredicate,
+    condition: SqlExpr,
     kind: &str,
+    counter: &mut u32,
 ) -> Result<Relation, CompileError> {
-    if left.row.field(&predicate.left_field).is_none() && !left.row.columns.is_empty() {
-        return Err(CompileError::new(format!(
-            "unknown field '{}' in left join input",
-            predicate.left_field
-        )));
-    }
-    if right.row.field(&predicate.right_field).is_none() && !right.row.columns.is_empty() {
-        return Err(CompileError::new(format!(
-            "unknown field '{}' in right join input",
-            predicate.right_field
-        )));
-    }
     let row = joined_row(&left.row, &right.row, kind);
     let selections = if row.columns.is_empty() {
         vec![
@@ -208,21 +314,32 @@ fn compile_join(
         "__joinFull" => JoinType::Full,
         _ => JoinType::Inner,
     };
-    let condition = SqlExpr::BinaryOp {
-        left: Box::new(sql_column(&predicate.left_field, Some("l"))),
-        op: compare_operator(&predicate.op)?,
-        right: Box::new(sql_column(&predicate.right_field, Some("r"))),
-    };
+    let Relation {
+        mut ctes,
+        statement: left_statement,
+        ..
+    } = left;
+    let Relation {
+        ctes: right_ctes,
+        statement: right_statement,
+        ..
+    } = right;
+    ctes.extend(right_ctes);
+    let l_name = fresh_cte("l", counter);
+    let r_name = fresh_cte("r", counter);
+    ctes.push(cte(&l_name, left_statement));
+    ctes.push(cte(&r_name, right_statement));
     let join = JoinClause {
         join_type,
-        table: subquery_source(right.statement, "r"),
+        table: cte_source(&r_name, "r"),
         on: Some(condition),
         using: vec![],
     };
     Ok(Relation {
+        ctes,
         statement: Box::new(select_statement(
             selections,
-            subquery_source(left.statement, "l"),
+            cte_source(&l_name, "l"),
             vec![join],
             None,
             vec![],
@@ -252,24 +369,39 @@ fn nullable(ty: crate::lang::Type) -> crate::lang::Type {
     }
 }
 
-fn compile_map_key(inner: Relation, mapper: &Mapper) -> Result<Relation, CompileError> {
-    if inner.row.columns.is_empty() {
+fn compile_map_key(
+    inner: Relation,
+    mapper: &Mapper,
+    counter: &mut u32,
+) -> Result<Relation, CompileError> {
+    let Relation {
+        mut ctes,
+        statement,
+        row: inner_row,
+    } = inner;
+    if inner_row.columns.is_empty() {
+        let name = fresh_cte("q", counter);
+        ctes.push(cte(&name, statement));
         return Ok(Relation {
+            ctes,
             statement: Box::new(select_statement(
                 vec![SelectItem::Wildcard],
-                subquery_source(inner.statement, "q"),
+                cte_source(&name, "q"),
                 vec![],
                 None,
                 vec![],
             )),
-            row: inner.row,
+            row: inner_row,
         });
     }
-    let (selections, row) = mapped_key_projection(&inner, mapper, "q");
+    let (selections, row) = mapped_key_projection(&inner_row, mapper, "q");
+    let name = fresh_cte("q", counter);
+    ctes.push(cte(&name, statement));
     Ok(Relation {
+        ctes,
         statement: Box::new(select_statement(
             selections,
-            subquery_source(inner.statement, "q"),
+            cte_source(&name, "q"),
             vec![],
             None,
             vec![],
@@ -278,21 +410,17 @@ fn compile_map_key(inner: Relation, mapper: &Mapper) -> Result<Relation, Compile
     })
 }
 
-fn compile_map_value(inner: Relation, mapper: &Mapper) -> Result<Relation, CompileError> {
-    if inner.row.columns.is_empty() {
-        return Ok(Relation {
-            statement: Box::new(select_statement(
-                vec![SelectItem::Wildcard],
-                subquery_source(inner.statement, "q"),
-                vec![],
-                None,
-                vec![],
-            )),
-            row: inner.row,
-        });
-    }
-    let selections = inner
-        .row
+fn compile_map_value(
+    inner: Relation,
+    mapper: &Mapper,
+    counter: &mut u32,
+) -> Result<Relation, CompileError> {
+    let Relation {
+        mut ctes,
+        statement,
+        row: inner_row,
+    } = inner;
+    let selections = inner_row
         .columns
         .iter()
         .map(|column| {
@@ -302,19 +430,26 @@ fn compile_map_value(inner: Relation, mapper: &Mapper) -> Result<Relation, Compi
             )
         })
         .collect();
+    let name = fresh_cte("q", counter);
+    ctes.push(cte(&name, statement));
     Ok(Relation {
+        ctes,
         statement: Box::new(select_statement(
             selections,
-            subquery_source(inner.statement, "q"),
+            cte_source(&name, "q"),
             vec![],
             None,
             vec![],
         )),
-        row: inner.row.map_value(mapper),
+        row: inner_row.map_value(mapper),
     })
 }
 
-fn compile_merge(left: Relation, right: Relation) -> Result<Relation, CompileError> {
+fn compile_merge(
+    left: Relation,
+    right: Relation,
+    counter: &mut u32,
+) -> Result<Relation, CompileError> {
     let row = left.row.merge(&right.row);
     let selections = if row.columns.is_empty() {
         vec![
@@ -344,16 +479,32 @@ fn compile_merge(left: Relation, right: Relation) -> Result<Relation, CompileErr
             })
             .collect()
     };
+    let Relation {
+        mut ctes,
+        statement: left_statement,
+        ..
+    } = left;
+    let Relation {
+        ctes: right_ctes,
+        statement: right_statement,
+        ..
+    } = right;
+    ctes.extend(right_ctes);
+    let l_name = fresh_cte("l", counter);
+    let r_name = fresh_cte("r", counter);
+    ctes.push(cte(&l_name, left_statement));
+    ctes.push(cte(&r_name, right_statement));
     let join = JoinClause {
         join_type: JoinType::Cross,
-        table: subquery_source(right.statement, "r"),
+        table: cte_source(&r_name, "r"),
         on: None,
         using: vec![],
     };
     Ok(Relation {
+        ctes,
         statement: Box::new(select_statement(
             selections,
-            subquery_source(left.statement, "l"),
+            cte_source(&l_name, "l"),
             vec![join],
             None,
             vec![],
@@ -362,11 +513,11 @@ fn compile_merge(left: Relation, right: Relation) -> Result<Relation, CompileErr
     })
 }
 
-fn mapped_key_projection(relation: &Relation, mapper: &Mapper, alias: &str) -> (Vec<SelectItem>, Row) {
+fn mapped_key_projection(row: &Row, mapper: &Mapper, alias: &str) -> (Vec<SelectItem>, Row) {
     let mut selections = Vec::new();
     let mut columns = Vec::new();
     let mut positions = HashMap::new();
-    for column in &relation.row.columns {
+    for column in &row.columns {
         let mapped = mapper.map_key(&column.name);
         let selection = select_expr(
             sql_column(&column.name, Some(alias)),
@@ -424,21 +575,13 @@ fn table_source(name: &str, schema: Option<&str>) -> TableSource {
         // `sqlglot-rust` currently emits schema names verbatim (the AST has
         // no schema quote-style field), so preserve the compiler's existing
         // ANSI quoting here.
-        schema: schema.map(|schema| quote_ident(schema)),
+        schema: schema.map(quote_ident),
         name: name.to_owned(),
         alias: None,
         temporal: None,
         name_quote_style: QuoteStyle::DoubleQuote,
         alias_quote_style: QuoteStyle::None,
     })
-}
-
-fn subquery_source(statement: Box<Statement>, alias: &str) -> TableSource {
-    TableSource::Subquery {
-        query: statement,
-        alias: Some(alias.to_owned()),
-        alias_quote_style: QuoteStyle::None,
-    }
 }
 
 fn sql_column(name: &str, table: Option<&str>) -> SqlExpr {

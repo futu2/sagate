@@ -6,7 +6,7 @@ The type core is Hindley-Milner plus records whose rows can be open. A row is
 an ordered sequence of bindings followed by either `Empty` or a row variable:
 
 ```text
-Row ::= Empty | { label : Type | Row } | r
+Row ::= Empty | { label = Type | Row } | r
 Type ::= int | string | maybe Type | Type -> Type | { Row } | alpha
 ```
 
@@ -16,8 +16,8 @@ explicit. It keeps old field positions, replaces a colliding old value with
 the new value, and appends labels that occur only in `new`.
 
 ```text
-merge { id:int, left:string } { id:string, right:int }
-  = { id:string, left:string, right:int }
+merge { id=int, left=string } { id=string, right=int }
+  = { id=string, left=string, right=int }
 ```
 
 There is no implicit subtyping relation. A row variable in a polymorphic
@@ -36,7 +36,7 @@ Kind ::= Type | Row | KeyMap | ValueMap
 
 `query` and `row` are type constructors from `Row` to `Type`. `query r` is a
 relation value, while `row r` is one record value. Rows also carry an extent:
-`closed {a:int}` contains exactly `a`, while `open {a:int | r}` may contain
+`closed {a=int}` contains exactly `a`, while `open {a=int | r}` may contain
 additional fields in its opaque tail.
 
 The kind rules are explicit:
@@ -52,8 +52,8 @@ kind `Type`. A bare `r -> s` uses ordinary HM type variables of kind `Type`;
 it does not silently turn them into rows.
 
 ```text
-RowTerm ::= closed { label : Type, ... }
-         | open { label : Type, ... | r }
+RowTerm ::= closed { label = Type, ... }
+         | open { label = Type, ... | r }
          | r
          | merge RowTerm RowTerm
          | mapkey KeyMapTerm RowTerm

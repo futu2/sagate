@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::ast::*;
-use super::checker::{comparison_operator, substitute};
+use super::checker::{is_scalar_primitive, substitute};
 
 include!("parser/lexer.rs");
 include!("parser/grammar.rs");

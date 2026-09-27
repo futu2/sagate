@@ -9,11 +9,6 @@ struct Definition {
 // ---------- HM-shaped type checking -------------------------------------
 
 pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> {
-    let tables: HashMap<_, _> = program
-        .tables
-        .iter()
-        .map(|table| (table.name.as_str(), &table.row))
-        .collect();
     let mut environment = HashMap::<String, Type>::new();
     let mut definitions = HashMap::<String, Definition>::new();
     let mut query_rows = HashMap::new();
@@ -28,7 +23,7 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> 
         }
         let expanded = expand_aliases(&binding.expr, &definitions, &environment);
         if let Some(annotation) = &binding.annotation {
-            check_expr_against(&binding.expr, annotation, &tables, &environment).map_err(
+            check_expr_against(&binding.expr, annotation, &environment).map_err(
                 |error| {
                     TypeError::new(format!(
                         "definition '{}' signature: {}",
@@ -41,7 +36,7 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> 
             if annotation_is_row_polymorphic(annotation) {
                 annotation.clone()
             } else {
-                infer_expr(&expanded, &tables, &environment).map_err(|error| {
+                infer_expr(&expanded, &environment).map_err(|error| {
                     TypeError::new(format!(
                         "definition '{}' inference: {}",
                         binding.name, error
@@ -49,7 +44,7 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> 
                 })?
             }
         } else {
-            infer_expr(&expanded, &tables, &environment).map_err(|error| {
+            infer_expr(&expanded, &environment).map_err(|error| {
                 TypeError::new(format!(
                     "definition '{}' inference: {}",
                     binding.name, error
@@ -218,31 +213,30 @@ fn validate_type_kinds_with(
         | Type::Date
         | Type::Timestamp
         | Type::Any
-        | Type::Table => Ok(Kind::Type),
+        | Type::Direction => Ok(Kind::Type),
     }
 }
 
 fn check_expr_against(
     expr: &Expr,
     expected: &Type,
-    tables: &HashMap<&str, &Row>,
     environment: &HashMap<String, Type>,
 ) -> Result<(), TypeError> {
     match (expr, expected) {
         (Expr::Lambda { param, body, .. }, Type::Function(argument, result)) => {
             let mut scoped = environment.clone();
             scoped.insert(param.clone(), (**argument).clone());
-            check_expr_against(body, result, tables, &scoped)
+            check_expr_against(body, result, &scoped)
         }
         (Expr::Overloaded(cases), _) => {
             for case in cases {
                 let case_type = case.annotation.as_ref().unwrap_or(expected);
-                check_expr_against(&case.expr, case_type, tables, environment)?;
+                check_expr_against(&case.expr, case_type, environment)?;
             }
             Ok(())
         }
         _ => {
-            let inferred = infer_expr(expr, tables, environment)?;
+            let inferred = infer_expr(expr, environment)?;
             if type_compatible(&inferred, expected) {
                 Ok(())
             } else {
@@ -416,7 +410,9 @@ fn expand_aliases(
             Expr::Var(name)
                 if definitions.contains_key(name)
                     && !bound.contains(name)
-                    && comparison_operator(name).is_none()
+                    // Primitives are declared, not defined; their applications
+                    // are typed by dedicated rules, so never inline them.
+                    && !name.starts_with("__")
                     && !matches!(environment.get(name), Some(Type::Relation(_)))
                     && !stack.contains(name) =>
             {
@@ -474,31 +470,21 @@ fn expand_aliases(
                 target: Box::new(go(target, definitions, environment, stack, bound)),
                 field: field.clone(),
             },
-            Expr::Binary { op, left, right } => Expr::Binary {
-                op: op.clone(),
-                left: Box::new(go(left, definitions, environment, stack, bound)),
-                right: Box::new(go(right, definitions, environment, stack, bound)),
-            },
-            Expr::Where { input, predicate } => Expr::Where {
-                input: Box::new(go(input, definitions, environment, stack, bound)),
-                predicate: predicate.clone(),
-            },
-            Expr::Select { input, fields } => Expr::Select {
-                input: Box::new(go(input, definitions, environment, stack, bound)),
-                fields: fields.clone(),
-            },
-            Expr::MapKey { input, mapper } => Expr::MapKey {
-                input: Box::new(go(input, definitions, environment, stack, bound)),
-                mapper: mapper.clone(),
-            },
-            Expr::MapValue { input, mapper } => Expr::MapValue {
-                input: Box::new(go(input, definitions, environment, stack, bound)),
-                mapper: mapper.clone(),
-            },
-            Expr::Merge { older, newer } => Expr::Merge {
-                older: Box::new(go(older, definitions, environment, stack, bound)),
-                newer: Box::new(go(newer, definitions, environment, stack, bound)),
-            },
+            Expr::List(elements) => Expr::List(
+                elements
+                    .iter()
+                    .map(|element| go(element, definitions, environment, stack, bound))
+                    .collect(),
+            ),
+            // Row literal values expand so that user-aliased aggregate
+            // constructors (`countRows = count; agg {all_rows = countRows}`)
+            // reach their primitive heads for the relational rules.
+            Expr::RowLiteral(fields) => Expr::RowLiteral(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), go(value, definitions, environment, stack, bound)))
+                    .collect(),
+            ),
             Expr::Overloaded(cases) => Expr::Overloaded(
                 cases
                     .iter()

@@ -4,6 +4,7 @@ struct Parser {
     index: usize,
     next_type_variable: u32,
     lambda_body_depth: usize,
+    allow_primitives: bool,
 }
 
 impl Parser {
@@ -14,7 +15,13 @@ impl Parser {
             index: 0,
             next_type_variable: 0,
             lambda_body_depth: 0,
+            allow_primitives: false,
         })
+    }
+
+    fn allowing_primitives(mut self) -> Self {
+        self.allow_primitives = true;
+        self
     }
 
     fn current(&self) -> &Token {
@@ -71,35 +78,20 @@ impl Parser {
     }
 
     fn parse_program(&mut self) -> Result<Program, String> {
-        let mut tables = Vec::new();
         let mut bindings = Vec::new();
         while !matches!(self.current().kind, TokenKind::Eof) {
             if self.eat_symbol(";") {
                 continue;
             }
-            if self.starts_table_declaration() {
-                self.eat_ident("table");
-                let table = self.parse_table()?;
-                if tables
-                    .iter()
-                    .any(|existing: &Table| existing.name == table.name)
-                {
-                    return self.error(format!("duplicate table '{}'", table.name));
-                }
-                tables.push(table);
-            } else if self.eat_ident("let") {
+            if self.eat_ident("let") {
                 let binding = self.parse_binding()?;
                 self.add_binding(&mut bindings, binding)?;
-            } else if matches!(self.current().kind, TokenKind::Ident(ref name) if name == "query") {
-                return self.error(
-                    "'query' declarations were removed; use an ordinary binding with a query annotation",
-                );
             } else {
                 let binding = self.parse_definition()?;
                 self.add_binding(&mut bindings, binding)?;
             }
         }
-        Ok(Program { tables, bindings })
+        Ok(Program { bindings })
     }
 
     fn add_binding(&self, bindings: &mut Vec<Binding>, binding: Binding) -> Result<(), String> {
@@ -138,38 +130,6 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_table(&mut self) -> Result<Table, String> {
-        let name = self.expect_ident()?;
-        self.expect_symbol("{")?;
-        let mut columns = Vec::new();
-        while !self.eat_symbol("}") {
-            let column_name = self.expect_ident()?;
-            self.expect_symbol(":")?;
-            let ty = self.parse_type()?;
-            if columns
-                .iter()
-                .any(|column: &Column| column.name == column_name)
-            {
-                return self.error(format!(
-                    "duplicate column '{column_name}' in table '{name}'"
-                ));
-            }
-            columns.push(Column {
-                name: column_name,
-                ty,
-            });
-            if !self.eat_symbol(",")
-                && !matches!(self.current().kind, TokenKind::Symbol(ref s) if s == "}")
-            {
-                return self.error("expected ',' or '}' after column");
-            }
-        }
-        Ok(Table {
-            name,
-            row: Row::new(columns),
-        })
-    }
-
     fn parse_binding(&mut self) -> Result<Binding, String> {
         let name = self.parse_binding_name()?;
         let annotation = if self.eat_symbol(":") {
@@ -194,6 +154,16 @@ impl Parser {
         } else {
             None
         };
+        // A bare declaration `name : type;` gives a backend primitive its
+        // type without a sagate body. The SQL compiler implements the name;
+        // the self-reference marker only carries the annotation.
+        if annotation.is_some() && self.eat_symbol(";") {
+            return Ok(Binding {
+                name: name.clone(),
+                annotation,
+                expr: Expr::Var(name),
+            });
+        }
         self.expect_symbol("=")?;
         let expr = desugar_implicit_lambda(self.parse_expr()?);
         self.eat_symbol(";");
@@ -208,7 +178,19 @@ impl Parser {
         if matches!(self.current().kind, TokenKind::Ident(ref name) if name == "_") {
             return self.parse_operator_section();
         }
-        self.expect_ident()
+        let name = self.expect_ident()?;
+        self.reject_primitive(&name)?;
+        Ok(name)
+    }
+
+    /// Double-underscore names name the backend primitive layer. Only the
+    /// prelude may declare them; user programs reach them through the prelude
+    /// wrappers.
+    fn reject_primitive(&self, name: &str) -> Result<(), String> {
+        if self.allow_primitives || !name.starts_with("__") {
+            return Ok(());
+        }
+        self.error(format!("primitive '{name}' is reserved for the prelude"))
     }
 
     fn parse_operator_section(&mut self) -> Result<String, String> {
@@ -221,27 +203,6 @@ impl Parser {
             return self.error("expected '_' after operator");
         }
         Ok(operator)
-    }
-
-    fn starts_table_declaration(&self) -> bool {
-        matches!(
-            (
-                self.tokens.get(self.index),
-                self.tokens.get(self.index + 1),
-                self.tokens.get(self.index + 2)
-            ),
-            (
-                Some(Token {
-                    kind: TokenKind::Ident(name), ..
-                }),
-                Some(Token {
-                    kind: TokenKind::Ident(_), ..
-                }),
-                Some(Token {
-                    kind: TokenKind::Symbol(symbol), ..
-                })
-            ) if name == "table" && symbol == "{"
-        )
     }
 
     fn parse_type(&mut self) -> Result<Type, String> {
@@ -290,7 +251,6 @@ impl Parser {
             "Row" | "row" => Ok(type_from_bare_row_expr(
                 self.parse_row_expr_atom(variables)?,
             )),
-            "Table" | "table" => Ok(Type::Table),
             "KeyMapper" | "keymapper" => {
                 if self.next_is_type_variable() {
                     let first = self.expect_ident()?;
@@ -311,6 +271,7 @@ impl Parser {
             }
             "Agg" | "agg" => Ok(Type::Aggregate(Box::new(self.parse_type_atom(variables)?))),
             "Group" | "group" => Ok(Type::Group(Box::new(self.parse_type_atom(variables)?))),
+            "Direction" | "direction" => Ok(Type::Direction),
             "Query" | "query" => {
                 if matches!(self.current().kind, TokenKind::Symbol(ref symbol) if symbol == "{") {
                     self.bump();
@@ -410,7 +371,7 @@ impl Parser {
         let mut columns = Vec::new();
         while !self.eat_symbol("}") {
             let name = self.expect_ident()?;
-            self.expect_symbol(":")?;
+            self.expect_symbol("=")?;
             let ty = self.parse_type_with_variables(variables)?;
             columns.push(Column { name, ty });
             if !self.eat_symbol(",")
@@ -496,9 +457,9 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, String> {
-        let mut expression = self.parse_infix_operand()?;
+        let mut expression = self.parse_binary(0)?;
         while self.eat_symbol("&") {
-            let right = self.parse_infix_operand()?;
+            let right = self.parse_binary(0)?;
             expression = Expr::Apply {
                 function: Box::new(Expr::Apply {
                     function: Box::new(Expr::Var("&".into())),
@@ -510,30 +471,47 @@ impl Parser {
         Ok(expression)
     }
 
-    fn parse_infix_operand(&mut self) -> Result<Expr, String> {
-        let left = self.parse_application()?;
-        if matches!(&self.current().kind, TokenKind::Symbol(operator) if is_infix_operator(operator) && operator != "&")
-        {
+    /// Precedence climbing over the symbolic infix operators. Recursing at
+    /// the same level keeps the language's right-associative reading; the
+    /// levels only decide which operator binds tighter.
+    fn parse_binary(&mut self, min_precedence: u8) -> Result<Expr, String> {
+        let mut expression = self.parse_application()?;
+        while let Some(precedence) = self.current_infix_precedence() {
+            if precedence < min_precedence {
+                break;
+            }
             let TokenKind::Symbol(operator) = self.bump().kind else {
-                unreachable!();
+                unreachable!("current_infix_precedence only matches symbols");
             };
-            let right = self.parse_comparison()?;
-            Ok(Expr::Apply {
+            let right = self.parse_binary(precedence)?;
+            expression = Expr::Apply {
                 function: Box::new(Expr::Apply {
                     function: Box::new(Expr::Var(operator)),
-                    argument: Box::new(left),
+                    argument: Box::new(expression),
                 }),
                 argument: Box::new(right),
-            })
-        } else {
-            Ok(left)
+            };
+        }
+        Ok(expression)
+    }
+
+    fn current_infix_precedence(&self) -> Option<u8> {
+        match &self.current().kind {
+            TokenKind::Symbol(operator) => infix_precedence(operator),
+            _ => None,
         }
     }
 
     fn parse_application(&mut self) -> Result<Expr, String> {
         let mut expression = self.parse_atom()?;
         loop {
-            if self.eat_symbol(".") {
+            // A dot glued to the expression is field access. A spaced dot is
+            // not part of the expression: it starts a new whitespace argument,
+            // which is the `.field` spelling of an implicit row function.
+            if matches!(&self.current().kind, TokenKind::Symbol(value) if value == ".")
+                && !self.whitespace_before_current()
+            {
+                self.bump();
                 let field = self.expect_ident()?;
                 expression = Expr::Access {
                     target: Box::new(expression),
@@ -563,13 +541,36 @@ impl Parser {
             if self.can_start_whitespace_argument() {
                 let argument = if matches!(self.current().kind, TokenKind::Symbol(ref value) if value == "{")
                 {
-                    desugar_implicit_lambda(self.parse_braced_projection()?)
+                    // A braced row literal argument is a row-function payload:
+                    // `select {id = .id}` maps each row to its row of fields.
+                    // Field markers rewrite into the payload row parameter; a
+                    // literal without markers is a constant payload.
+                    let literal = self.parse_braced_projection()?;
+                    let (has_left, has_right) = implicit_field_markers(&literal);
+                    if has_left || has_right {
+                        desugar_implicit_lambda(literal)
+                    } else {
+                        implicit_row_lambda(literal)
+                    }
                 } else if matches!(self.current().kind, TokenKind::Symbol(ref value) if value == "." || value == "(")
                 {
                     // A bare field expression used as a whitespace argument
                     // is an implicit row function. This also accepts the
                     // parenthesized spelling used by query combinators.
                     desugar_implicit_lambda(self.parse_expr()?)
+                } else if matches!(self.current().kind, TokenKind::Symbol(ref value) if value == "[")
+                {
+                    // A bracketed list argument is a row-function payload,
+                    // like a braced row literal: `order [asc .name]` maps each
+                    // row to its list of tagged keys. The atom is delimited by
+                    // `]`, so it does not swallow a following `&` step.
+                    let list = self.parse_atom()?;
+                    let (has_left, has_right) = implicit_field_markers(&list);
+                    if has_left || has_right {
+                        desugar_implicit_lambda(list)
+                    } else {
+                        implicit_row_lambda(list)
+                    }
                 } else {
                     self.parse_atom()?
                 };
@@ -588,7 +589,7 @@ impl Parser {
         match &self.current().kind {
             TokenKind::Ident(name) => name != "in" && !self.newline_before_current(),
             TokenKind::String(_) | TokenKind::Number(_) => true,
-            TokenKind::Symbol(symbol) => matches!(symbol.as_str(), "." | "(" | "{"),
+            TokenKind::Symbol(symbol) => matches!(symbol.as_str(), "." | "(" | "{" | "["),
             TokenKind::Eof => false,
         }
     }
@@ -599,6 +600,16 @@ impl Parser {
         }
         let previous = self.tokens[self.index - 1].start;
         self.source[previous..self.current().start].contains('\n')
+    }
+
+    fn whitespace_before_current(&self) -> bool {
+        if self.index == 0 {
+            return false;
+        }
+        let previous = self.tokens[self.index - 1].start;
+        self.source[previous..self.current().start]
+            .chars()
+            .any(char::is_whitespace)
     }
 
     fn parse_argument(&mut self) -> Result<Expr, String> {
@@ -615,9 +626,6 @@ impl Parser {
         {
             return Ok(Expr::Var(self.parse_operator_section()?));
         }
-        if matches!(self.current().kind, TokenKind::Ident(ref name) if name == "from") {
-            return self.error("'from' source syntax was removed; use table \"schema\" \"name\"");
-        }
         if self.eat_symbol("(") {
             let expression = self.parse_expr()?;
             self.expect_symbol(")")?;
@@ -626,6 +634,19 @@ impl Parser {
         if matches!(self.current().kind, TokenKind::Symbol(ref symbol) if symbol == "{") {
             return self.parse_braced_projection();
         }
+        if self.eat_symbol("[") {
+            let mut elements = Vec::new();
+            if !self.eat_symbol("]") {
+                loop {
+                    elements.push(self.parse_expr()?);
+                    if self.eat_symbol("]") {
+                        break;
+                    }
+                    self.expect_symbol(",")?;
+                }
+            }
+            return Ok(Expr::List(elements));
+        }
         if self.eat_symbol(".") {
             return Ok(Expr::Field(self.expect_ident()?));
         }
@@ -633,6 +654,17 @@ impl Parser {
             TokenKind::Ident(value) if value == "true" => Ok(Expr::Literal(Literal::Bool(true))),
             TokenKind::Ident(value) if value == "false" => Ok(Expr::Literal(Literal::Bool(false))),
             TokenKind::Ident(value) if value == "null" => Ok(Expr::Literal(Literal::Null)),
+            // Temporal literals are syntax: `date "..."` and `timestamp "..."`
+            // construct typed literals directly.
+            TokenKind::Ident(value) if matches!(value.as_str(), "date" | "timestamp") => {
+                match self.bump().kind {
+                    TokenKind::String(text) if value == "date" => {
+                        Ok(Expr::Literal(Literal::Date(text)))
+                    }
+                    TokenKind::String(text) => Ok(Expr::Literal(Literal::Timestamp(text))),
+                    _ => self.error(format!("expected a string literal after '{value}'")),
+                }
+            }
             TokenKind::Ident(value) => Ok(Expr::Var(value)),
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value))),
             TokenKind::Number(value) if value.contains('.') => {
@@ -646,80 +678,26 @@ impl Parser {
         }
     }
 
+    /// Parse a row literal `{x1 = v1, x2 = v2}`. Field values are ordinary
+    /// expressions; `.field` markers inside them turn the literal into a
+    /// row function through the implicit-lambda rewrite of the braced
+    /// argument. This one form covers select projections, aggregate
+    /// projections, and plain row values.
     fn parse_braced_projection(&mut self) -> Result<Expr, String> {
-        let aggregate = matches!(
-            self.tokens.get(self.index + 3).map(|token| &token.kind),
-            Some(TokenKind::Ident(_))
-        ) && !(self.lambda_body_depth > 0 && matches!(
-            self.tokens.get(self.index + 4).map(|token| &token.kind),
-            Some(TokenKind::Symbol(symbol)) if symbol == "."
-        ));
-        if aggregate {
-            Ok(Expr::AggregateProjection(self.parse_aggregate_fields()?))
-        } else {
-            Ok(Expr::Projection(self.parse_select_fields()?))
-        }
-    }
-
-    fn parse_select_fields(&mut self) -> Result<Vec<SelectField>, String> {
         self.expect_symbol("{")?;
         let mut fields = Vec::new();
         while !self.eat_symbol("}") {
-            let alias = self.expect_ident()?;
-            self.expect_symbol(":")?;
-            let field = self.parse_projection_field_ref()?;
-            fields.push(SelectField { alias, field });
+            let name = self.expect_ident()?;
+            self.expect_symbol("=")?;
+            let value = self.parse_expr()?;
+            fields.push((name, value));
             if !self.eat_symbol(",")
                 && !matches!(self.current().kind, TokenKind::Symbol(ref s) if s == "}")
             {
-                return self.error("expected ',' or '}' after select field");
+                return self.error("expected ',' or '}' after row field");
             }
         }
-        Ok(fields)
-    }
-
-    fn parse_aggregate_fields(&mut self) -> Result<Vec<AggregateField>, String> {
-        self.expect_symbol("{")?;
-        let mut fields = Vec::new();
-        while !self.eat_symbol("}") {
-            let alias = self.expect_ident()?;
-            self.expect_symbol(":")?;
-            let operation = AggregateOp::Named(self.expect_ident()?);
-            let field = if matches!(self.current().kind, TokenKind::Symbol(ref symbol) if symbol == ".")
-            {
-                Some(self.parse_field_ref()?)
-            } else {
-                None
-            };
-            fields.push(AggregateField {
-                alias,
-                operation,
-                field,
-            });
-            if !self.eat_symbol(",")
-                && !matches!(self.current().kind, TokenKind::Symbol(ref s) if s == "}")
-            {
-                return self.error("expected ',' or '}' after aggregate field");
-            }
-        }
-        Ok(fields)
-    }
-
-    fn parse_field_ref(&mut self) -> Result<String, String> {
-        self.expect_symbol(".")?;
-        self.expect_ident()
-    }
-
-    fn parse_projection_field_ref(&mut self) -> Result<String, String> {
-        if self.eat_symbol(".") {
-            return self.expect_ident();
-        }
-        // Explicit lambda projections may spell the source field as
-        // `row.field`; the row variable is structural and does not affect the
-        // selected SQL column.
-        let _row = self.expect_ident()?;
-        self.expect_symbol(".")?;
-        self.expect_ident()
+        Ok(Expr::RowLiteral(fields))
     }
 
 }
@@ -731,8 +709,34 @@ fn is_infix_operator(operator: &str) -> bool {
             .any(|character| character.is_ascii_alphanumeric() || character == '_')
         && !matches!(
             operator,
-            "|>" | "=>" | "->" | "=" | ":" | "," | ";" | "." | "(" | ")" | "{" | "}"
+            "|>" | "=>" | "->" | "=" | ":" | "," | ";" | "." | "(" | ")" | "{" | "}" | "["
+                | "]"
         )
+}
+
+/// Binding tightness of the symbolic infix operators. The scalar arithmetic
+/// and comparison operators get conventional precedence; every other
+/// (user-defined) operator binds loosest.
+fn infix_precedence(operator: &str) -> Option<u8> {
+    match operator {
+        "||" => Some(1),
+        "&&" => Some(2),
+        "==" | "!=" | "<" | "<=" | ">" | ">=" => Some(3),
+        "+" | "-" => Some(4),
+        "*" | "/" | "%" => Some(5),
+        operator if operator != "&" && is_infix_operator(operator) => Some(0),
+        _ => None,
+    }
+}
+
+/// Wrap an expression into a single-row function. Braced row literals and
+/// bracketed list arguments always denote row-function payloads.
+fn implicit_row_lambda(body: Expr) -> Expr {
+    Expr::Lambda {
+        param: "row".to_owned(),
+        annotation: Some(implicit_row_type()),
+        body: Box::new(body),
+    }
 }
 
 /// Elaborate the row-field shorthand into an ordinary function value.
@@ -748,13 +752,6 @@ fn desugar_implicit_lambda(expr: Expr) -> Expr {
     // parameter introduced outside that lambda.
     if matches!(expr, Expr::Lambda { .. }) {
         return expr;
-    }
-    if matches!(expr, Expr::Projection(_)) {
-        return Expr::Lambda {
-            param: "row".to_owned(),
-            annotation: Some(implicit_row_type()),
-            body: Box::new(expr),
-        };
     }
     let (has_left, has_right) = implicit_field_markers(&expr);
     if !has_left && !has_right {
@@ -791,17 +788,20 @@ fn implicit_row_type() -> Type {
 fn implicit_field_markers(expr: &Expr) -> (bool, bool) {
     match expr {
         Expr::Field(_) => (true, false),
+        Expr::RowLiteral(fields) => fields.iter().fold((false, false), |acc, (_, value)| {
+            let markers = implicit_field_markers(value);
+            (acc.0 || markers.0, acc.1 || markers.1)
+        }),
+        Expr::List(elements) => elements.iter().fold((false, false), |acc, element| {
+            let markers = implicit_field_markers(element);
+            (acc.0 || markers.0, acc.1 || markers.1)
+        }),
         Expr::Access { target, .. } => {
             let right = matches!(target.as_ref(), Expr::Var(name) if name == "that");
             let (left, nested_right) = implicit_field_markers(target);
             (left, right || nested_right)
         }
-        Expr::Apply { function, argument }
-        | Expr::Binary {
-            left: function,
-            right: argument,
-            ..
-        } => {
+        Expr::Apply { function, argument } => {
             let (left_a, right_a) = implicit_field_markers(function);
             let (left_b, right_b) = implicit_field_markers(argument);
             (left_a || left_b, right_a || right_b)
@@ -828,6 +828,23 @@ fn rewrite_implicit_fields(expr: Expr, left_param: &str, right_param: &str) -> E
             target: Box::new(Expr::Var(left_param.to_owned())),
             field,
         },
+        Expr::RowLiteral(fields) => Expr::RowLiteral(
+            fields
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        name,
+                        rewrite_implicit_fields(value, left_param, right_param),
+                    )
+                })
+                .collect(),
+        ),
+        Expr::List(elements) => Expr::List(
+            elements
+                .into_iter()
+                .map(|element| rewrite_implicit_fields(element, left_param, right_param))
+                .collect(),
+        ),
         Expr::Access { target, field } => {
             if matches!(target.as_ref(), Expr::Var(name) if name == "that") {
                 Expr::Access {
@@ -844,11 +861,6 @@ fn rewrite_implicit_fields(expr: Expr, left_param: &str, right_param: &str) -> E
         Expr::Apply { function, argument } => Expr::Apply {
             function: Box::new(rewrite_implicit_fields(*function, left_param, right_param)),
             argument: Box::new(rewrite_implicit_fields(*argument, left_param, right_param)),
-        },
-        Expr::Binary { op, left, right } => Expr::Binary {
-            op,
-            left: Box::new(rewrite_implicit_fields(*left, left_param, right_param)),
-            right: Box::new(rewrite_implicit_fields(*right, left_param, right_param)),
         },
         Expr::Let { name, value, body } => Expr::Let {
             name,

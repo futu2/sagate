@@ -296,7 +296,7 @@ fn apply_function_type(
     }
 }
 
-fn flatten_apply(expr: &Expr) -> (&Expr, Vec<&Expr>) {
+pub fn flatten_apply(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     let mut args = Vec::new();
     let mut current = expr;
     while let Expr::Apply { function, argument } = current {
@@ -307,102 +307,25 @@ fn flatten_apply(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     (current, args)
 }
 
-fn primitive_value_type(name: &str) -> Option<Type> {
-    match name {
-        "__table" => Some(Type::Function(
-            Box::new(Type::String),
-            Box::new(Type::Function(
-                Box::new(Type::String),
-                Box::new(Type::Relation(Row::default())),
-            )),
-        )),
-        "__where" | "__select" | "__mapKey" | "__mapValue" | "__merge" | "__agg"
-        | "__joinInner" | "__joinLeft" | "__joinRight" | "__joinFull" => {
-            Some(binary_scalar_type(Type::Any, Type::Any, Type::Any))
-        }
-        "__snake" => Some(type_from_mapper(MapperType::Known(Mapper::Snake), true)),
-        "__kebab" => Some(type_from_mapper(MapperType::Known(Mapper::Kebab), true)),
-        "__camel" => Some(type_from_mapper(MapperType::Known(Mapper::Camel), true)),
-        "__prefix" | "__suffix" => Some(Type::Function(
-            Box::new(Type::String),
-            Box::new(type_from_mapper(MapperType::Unknown, true)),
-        )),
-        "__maybe" => Some(type_from_mapper(MapperType::Known(Mapper::Maybe), false)),
-        "__list" => Some(type_from_mapper(MapperType::Known(Mapper::List), false)),
-        "__date" => Some(Type::Function(Box::new(Type::String), Box::new(Type::Date))),
-        "__timestamp" => Some(Type::Function(
-            Box::new(Type::String),
-            Box::new(Type::Timestamp),
-        )),
-        "__add" | "__sub" => Some(overloaded_type(vec![
-            binary_scalar_type(Type::Int, Type::Int, Type::Int),
-            binary_scalar_type(Type::Float, Type::Float, Type::Float),
-        ])),
-        "__mul" | "__mod" => Some(binary_scalar_type(Type::Int, Type::Int, Type::Int)),
-        "__div" => Some(binary_scalar_type(Type::Float, Type::Float, Type::Float)),
-        "__eq" | "__ne" => Some(comparison_type(true)),
-        "__lt" | "__le" | "__gt" | "__ge" => Some(comparison_type(false)),
-        "__and" | "__or" => Some(binary_scalar_type(Type::Bool, Type::Bool, Type::Bool)),
-        "__count" => Some(Type::Function(
-            Box::new(Type::Variable(0)),
-            Box::new(Type::Aggregate(Box::new(Type::Int))),
-        )),
-        "__sum" | "__min" | "__max" => Some(Type::Function(
-            Box::new(Type::Variable(0)),
-            Box::new(Type::Aggregate(Box::new(Type::Variable(0)))),
-        )),
-        "__avg" => Some(Type::Function(
-            Box::new(Type::Variable(0)),
-            Box::new(Type::Aggregate(Box::new(Type::Float))),
-        )),
-        "__group" => Some(Type::Function(
-            Box::new(Type::Variable(0)),
-            Box::new(Type::Group(Box::new(Type::Variable(0)))),
-        )),
-        _ => None,
-    }
-}
-
-fn binary_scalar_type(argument: Type, right: Type, result: Type) -> Type {
-    Type::Function(
-        Box::new(argument),
-        Box::new(Type::Function(Box::new(right), Box::new(result))),
+/// The scalar primitives an infix operator can name. User-spelled operators
+/// are rewritten to the primitive they resolve to, so overrides and the
+/// declarations decide their semantics and typing.
+pub fn is_scalar_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "__eq" | "__ne"
+            | "__lt"
+            | "__le"
+            | "__gt"
+            | "__ge"
+            | "__add"
+            | "__sub"
+            | "__mul"
+            | "__div"
+            | "__mod"
+            | "__and"
+            | "__or"
     )
-}
-
-fn comparison_type(include_bool: bool) -> Type {
-    let mut types = vec![
-        Type::Int,
-        Type::Float,
-        Type::String,
-        Type::Date,
-        Type::Timestamp,
-    ];
-    if include_bool {
-        types.push(Type::Bool);
-    }
-    overloaded_type(
-        types
-            .into_iter()
-            .map(|ty| binary_scalar_type(ty.clone(), ty, Type::Bool))
-            .collect(),
-    )
-}
-
-pub(super) fn comparison_operator(operator: &str) -> Option<CompareOp> {
-    match operator {
-        "__eq" => Some(CompareOp::Eq),
-        "__ne" => Some(CompareOp::Ne),
-        "__lt" => Some(CompareOp::Lt),
-        "__le" => Some(CompareOp::Le),
-        "__gt" => Some(CompareOp::Gt),
-        "__ge" => Some(CompareOp::Ge),
-        _ => None,
-    }
-}
-
-fn expect_relation(ty: Type) -> Result<Row, TypeError> {
-    relation_row(&ty).ok_or_else(|| TypeError::new(format!("expected a relation, got {ty}")))
 }
 
 fn relation_row_expr(ty: Type, state: &mut InferState) -> Result<RowExpr, TypeError> {
@@ -418,81 +341,4 @@ fn relation_row_expr(ty: Type, state: &mut InferState) -> Result<RowExpr, TypeEr
         return Ok(RowExpr::Concrete(Row::default()));
     }
     Err(TypeError::new(format!("expected a relation, got {ty}")))
-}
-
-fn predicate_value(expr: &Expr) -> Result<Predicate, TypeError> {
-    match expr {
-        Expr::Predicate(predicate) => Ok(predicate.clone()),
-        Expr::Lambda { body, .. } => predicate_value_from_expr(body),
-        Expr::Annotated { expr, .. } => predicate_value(expr),
-        _ => Err(TypeError::new("where expects a predicate")),
-    }
-}
-
-fn predicate_value_from_expr(expr: &Expr) -> Result<Predicate, TypeError> {
-    let (op, left, right) = match expr {
-        Expr::Binary { op, left, right } => (op.clone(), left.as_ref(), right.as_ref()),
-        Expr::Apply { .. } => {
-            let (head, arguments) = flatten_apply(expr);
-            if arguments.len() != 2 {
-                return Err(TypeError::new("where expects a predicate"));
-            }
-            let Expr::Var(operator) = head else {
-                return Err(TypeError::new("where expects a predicate"));
-            };
-            let Some(op) = comparison_operator(operator) else {
-                return Err(TypeError::new("where expects a comparison predicate"));
-            };
-            (op, arguments[0], arguments[1])
-        }
-        _ => return Err(TypeError::new("where expects a predicate")),
-    };
-    let field = match left {
-        Expr::Field(field) => field.clone(),
-        Expr::Access { field, .. } => field.clone(),
-        _ => return Err(TypeError::new("predicate must compare a row field")),
-    };
-    let value = predicate_literal(right).ok_or_else(|| {
-        TypeError::new("predicate must compare a field with a literal")
-    })?;
-    Ok(Predicate {
-        field,
-        op,
-        value,
-    })
-}
-
-fn predicate_literal(expr: &Expr) -> Option<Literal> {
-    match expr {
-        Expr::Literal(value) => Some(value.clone()),
-        Expr::Apply { .. } => {
-            let (head, arguments) = flatten_apply(expr);
-            let head = match head {
-                Expr::Annotated { expr, .. } => expr.as_ref(),
-                head => head,
-            };
-            let Expr::Lambda { body, .. } = head else {
-                let Expr::Var(name) = head else { return None; };
-                let [Expr::Literal(Literal::String(value))] = arguments.as_slice() else { return None; };
-                return match name.as_str() {
-                    "date" | "__date" => Some(Literal::Date(value.clone())),
-                    "timestamp" | "__timestamp" => Some(Literal::Timestamp(value.clone())),
-                    _ => None,
-                };
-            };
-            let Expr::Apply { function, .. } = body.as_ref() else {
-                return None;
-            };
-            let Expr::Var(name) = function.as_ref() else {
-                return None;
-            };
-            let [Expr::Literal(Literal::String(value))] = arguments.as_slice() else { return None; };
-            match name.as_str() {
-                "__date" => Some(Literal::Date(value.clone())),
-                "__timestamp" => Some(Literal::Timestamp(value.clone())),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
 }

@@ -3,9 +3,8 @@ mod checker;
 mod parser;
 
 pub use ast::{
-    AggregateField, AggregateOp, Binding, Column, CompareOp, Expr, Extent, Kind, Literal, Mapper,
-    MapperType, OverloadCase, Predicate, Program, Row, RowExpr, SelectField, Table, Type,
-    TypeError,
+    AggregateField, AggregateOp, Binding, Column, Expr, Extent, Kind, Literal, Mapper, MapperType,
+    OverloadCase, Program, Row, RowExpr, Type, TypeError,
 };
-pub use checker::type_check;
+pub use checker::{flatten_apply, substitute, type_check};
 pub use parser::parse;

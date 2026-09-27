@@ -2,6 +2,81 @@
 # backend primitive layer used by the SQL compiler.
 # Repeated operator definitions are an explicit finite overload set. Numeric
 # operations intentionally keep int and float signatures separate.
+
+# Backend primitive declarations. These names are implemented by the SQL
+# compiler, not by sagate code; the declarations are the type-level source of
+# truth. Relational primitives get their real typing from dedicated compiler
+# rules, so their declarations only cover bare references.
+__table : string -> string -> any;
+__where : any -> any -> any;
+__select : any -> any -> any;
+__mapKey : any -> any -> any;
+__mapValue : any -> any -> any;
+__merge : any -> any -> any;
+__agg : any -> any -> any;
+__joinInner : any -> any -> any;
+__joinLeft : any -> any -> any;
+__joinRight : any -> any -> any;
+__joinFull : any -> any -> any;
+__order : any -> any -> any;
+__limit : any -> any -> any;
+__asc : a -> direction;
+__desc : a -> direction;
+__snake : keymapper;
+__kebab : keymapper;
+__camel : keymapper;
+__prefix : string -> keymapper;
+__suffix : string -> keymapper;
+__maybe : valuemapper;
+__list : valuemapper;
+__add : int -> int -> int;
+__add : float -> float -> float;
+__sub : int -> int -> int;
+__sub : float -> float -> float;
+__mul : int -> int -> int;
+__div : float -> float -> float;
+__mod : int -> int -> int;
+__eq : int -> int -> bool;
+__eq : float -> float -> bool;
+__eq : string -> string -> bool;
+__eq : bool -> bool -> bool;
+__eq : date -> date -> bool;
+__eq : timestamp -> timestamp -> bool;
+__ne : int -> int -> bool;
+__ne : float -> float -> bool;
+__ne : string -> string -> bool;
+__ne : bool -> bool -> bool;
+__ne : date -> date -> bool;
+__ne : timestamp -> timestamp -> bool;
+__lt : int -> int -> bool;
+__lt : float -> float -> bool;
+__lt : string -> string -> bool;
+__lt : date -> date -> bool;
+__lt : timestamp -> timestamp -> bool;
+__le : int -> int -> bool;
+__le : float -> float -> bool;
+__le : string -> string -> bool;
+__le : date -> date -> bool;
+__le : timestamp -> timestamp -> bool;
+__gt : int -> int -> bool;
+__gt : float -> float -> bool;
+__gt : string -> string -> bool;
+__gt : date -> date -> bool;
+__gt : timestamp -> timestamp -> bool;
+__ge : int -> int -> bool;
+__ge : float -> float -> bool;
+__ge : string -> string -> bool;
+__ge : date -> date -> bool;
+__ge : timestamp -> timestamp -> bool;
+__and : bool -> bool -> bool;
+__or : bool -> bool -> bool;
+__count : a -> agg int;
+__sum : a -> agg a;
+__avg : a -> agg float;
+__min : a -> agg a;
+__max : a -> agg a;
+__group : a -> group a;
+
 table : string -> string -> query r = schemaName => tableName => __table schemaName tableName
 
 _+_ : int -> int -> int = left => right => __add left right
@@ -62,8 +137,12 @@ left = right_relation => predicate => left_relation => __joinLeft right_relation
 right = right_relation => predicate => left_relation => __joinRight right_relation predicate left_relation
 full = right_relation => predicate => left_relation => __joinFull right_relation predicate left_relation
 
-date : string -> date = value => __date value
-timestamp : string -> timestamp = value => __timestamp value
+# Sort keys tag each key value with its direction; the key function maps a
+# row to that tagged list.
+asc : a -> direction = value => __asc value
+desc : a -> direction = value => __desc value
+order : (row r -> list direction) -> query r -> query r = keys => relation => __order keys relation
+limit : int -> query r -> query r = n => relation => __limit n relation
 
 group : a -> group a = field => __group field
 count : a -> agg int = field => __count field

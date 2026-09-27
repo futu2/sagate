@@ -4,7 +4,6 @@ use std::{collections::HashMap, fmt};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
-    pub tables: Vec<Table>,
     pub bindings: Vec<Binding>,
 }
 
@@ -13,12 +12,6 @@ pub struct Binding {
     pub name: String,
     pub annotation: Option<Type>,
     pub expr: Expr,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Table {
-    pub name: String,
-    pub row: Row,
 }
 
 /// The core language is deliberately small: values are variables, lambdas,
@@ -47,48 +40,22 @@ pub enum Expr {
         ty: Type,
     },
     Literal(Literal),
-    Table(String),
     Field(String),
     Access {
         target: Box<Expr>,
         field: String,
     },
-    Binary {
-        op: CompareOp,
-        left: Box<Expr>,
-        right: Box<Expr>,
-    },
-    Predicate(Predicate),
-    Projection(Vec<SelectField>),
-    AggregateProjection(Vec<AggregateField>),
+    /// A row literal: `{x = v1, y = v2}`. Field values are ordinary
+    /// expressions; field markers inside them (the `.field` spelling) turn
+    /// the literal into a row function, which is how `select` projections
+    /// and aggregate projections are written.
+    RowLiteral(Vec<(String, Expr)>),
+    /// A list literal. Lists appear as the sort-key payload of `order`: the
+    /// key function maps a row to a list of `asc`/`desc` tagged values.
+    List(Vec<Expr>),
     Mapper {
         mapper: Mapper,
         key: bool,
-    },
-
-    // Compatibility nodes accepted by programmatic callers. The parser emits
-    // functional applications, while these forms remain supported by the
-    // checker and SQL lowerer for existing AST users.
-    Source(String),
-    Where {
-        input: Box<Expr>,
-        predicate: Predicate,
-    },
-    Select {
-        input: Box<Expr>,
-        fields: Vec<SelectField>,
-    },
-    MapKey {
-        input: Box<Expr>,
-        mapper: Mapper,
-    },
-    MapValue {
-        input: Box<Expr>,
-        mapper: Mapper,
-    },
-    Merge {
-        older: Box<Expr>,
-        newer: Box<Expr>,
     },
 
     /// A name with multiple definitions. Overloads are resolved from the
@@ -104,19 +71,6 @@ pub struct OverloadCase {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SelectField {
-    pub alias: String,
-    pub field: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct AggregateField {
-    pub alias: String,
-    pub operation: AggregateOp,
-    pub field: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub enum AggregateOp {
     Named(String),
     Group,
@@ -127,22 +81,13 @@ pub enum AggregateOp {
     Max,
 }
 
+/// One extracted aggregate column: `{total = sum .total}` contributes
+/// `(total, Sum, Some("total"))`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Predicate {
-    pub field: String,
-    pub op: CompareOp,
-    pub value: Literal,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum CompareOp {
-    Named(String),
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
+pub struct AggregateField {
+    pub alias: String,
+    pub operation: AggregateOp,
+    pub field: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -267,7 +212,6 @@ pub enum Type {
     /// A row itself, used as the argument/result of ordinary predicate and
     /// projection functions.
     RowVariable(u32),
-    Table,
     KeyMapper,
     KeyMapperOf(Box<Type>, Box<Type>),
     KeyMapperWitness(Box<MapperType>),
@@ -276,6 +220,10 @@ pub enum Type {
     ValueMapperWitness(Box<MapperType>),
     Aggregate(Box<Type>),
     Group(Box<Type>),
+    /// The element type of an `order` sort key. `asc`/`desc` tag a key value
+    /// with its sort direction; the tagged value erases the key's own type,
+    /// which the relational rules validate against the relation's row.
+    Direction,
     /// A finite overload set. Unlike a type variable this does not widen to
     /// an arbitrary type: one of the listed function schemes must match.
     Overloaded(Vec<Type>),
@@ -431,14 +379,6 @@ pub(super) fn relation_of_row_type(ty: Type) -> Option<Type> {
     }
 }
 
-pub(super) fn type_from_mapper(mapper: MapperType, key: bool) -> Type {
-    if key {
-        Type::KeyMapperWitness(Box::new(mapper))
-    } else {
-        Type::ValueMapperWitness(Box::new(mapper))
-    }
-}
-
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -459,7 +399,6 @@ impl fmt::Display for Type {
             Self::RelationExpr(row) => write!(f, "query ({row})"),
             Self::RelationVariable(id) => write!(f, "query {}", type_variable_name(*id)),
             Self::RowVariable(id) => write!(f, "{}", type_variable_name(*id)),
-            Self::Table => write!(f, "table"),
             Self::KeyMapper => write!(f, "keymapper"),
             Self::KeyMapperOf(input, output) => write!(f, "keymapper {input} {output}"),
             Self::KeyMapperWitness(mapper) => write!(f, "keymapper {mapper}"),
@@ -468,6 +407,7 @@ impl fmt::Display for Type {
             Self::ValueMapperWitness(mapper) => write!(f, "valuemapper {mapper}"),
             Self::Aggregate(inner) => write!(f, "agg {inner}"),
             Self::Group(inner) => write!(f, "group {inner}"),
+            Self::Direction => write!(f, "direction"),
             Self::Overloaded(types) => {
                 let types = types
                     .iter()

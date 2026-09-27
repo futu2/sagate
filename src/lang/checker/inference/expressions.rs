@@ -1,6 +1,5 @@
 fn infer_expr(
     expr: &Expr,
-    tables: &HashMap<&str, &Row>,
     environment: &HashMap<String, Type>,
 ) -> Result<Type, TypeError> {
     // Keep inferred lambda variables separate from variables written in a
@@ -9,13 +8,12 @@ fn infer_expr(
         next_variable: 1_000_000,
         substitutions: HashMap::new(),
     };
-    let inferred = infer_expr_with_state(expr, tables, environment, &mut state)?;
+    let inferred = infer_expr_with_state(expr, environment, &mut state)?;
     Ok(resolve_type(inferred, &state.substitutions))
 }
 
 fn infer_expr_with_state(
     expr: &Expr,
-    tables: &HashMap<&str, &Row>,
     environment: &HashMap<String, Type>,
     state: &mut InferState,
 ) -> Result<Type, TypeError> {
@@ -23,51 +21,36 @@ fn infer_expr_with_state(
         Expr::Var(name) => environment
             .get(name)
             .cloned()
-            .or_else(|| primitive_value_type(name))
+            .or_else(|| name.starts_with("__").then_some(Type::Any))
             .ok_or_else(|| TypeError::new(format!("unknown variable '{name}'"))),
-        Expr::Table(_) => Ok(Type::Table),
         Expr::Literal(literal) => Ok(literal_type(literal)),
         Expr::Annotated { expr, ty } => {
             let ty = freshen_type(ty, state);
-            let inferred = infer_expr_with_state(expr, tables, environment, state)?;
+            let inferred = infer_expr_with_state(expr, environment, state)?;
             apply_annotation(inferred, Some(&ty))
         }
         Expr::Field(_) | Expr::Access { .. } => Ok(Type::Any),
-        Expr::Predicate(_) => {
-            let row = type_from_bare_row_expr(RowExpr::Variable(fresh_id(state)));
-            Ok(Type::Function(Box::new(row), Box::new(Type::Bool)))
+        Expr::RowLiteral(fields) => {
+            let mut columns = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                let ty = infer_expr_with_state(value, environment, state)?;
+                columns.push(Column {
+                    name: name.clone(),
+                    ty,
+                });
+            }
+            Ok(Type::Record(Row::new(columns)))
         }
-        Expr::Projection(fields) => {
-            let input = type_from_bare_row_expr(RowExpr::Variable(fresh_id(state)));
-            let output = Row::new(
-                fields
-                    .iter()
-                    .map(|field| Column {
-                        name: field.alias.clone(),
-                        ty: Type::Any,
-                    })
-                    .collect(),
-            );
-            Ok(Type::Function(
-                Box::new(input),
-                Box::new(Type::Record(output)),
-            ))
-        }
-        Expr::AggregateProjection(fields) => {
-            let input = type_from_bare_row_expr(RowExpr::Variable(fresh_id(state)));
-            let output = Row::new(
-                fields
-                    .iter()
-                    .map(|field| Column {
-                        name: field.alias.clone(),
-                        ty: Type::Any,
-                    })
-                    .collect(),
-            );
-            Ok(Type::Function(
-                Box::new(input),
-                Box::new(Type::Record(output)),
-            ))
+        Expr::List(elements) => {
+            let mut element_ty: Option<Type> = None;
+            for element in elements {
+                let ty = infer_expr_with_state(element, environment, state)?;
+                match &element_ty {
+                    Some(previous) => unify_types(previous.clone(), ty, state)?,
+                    None => element_ty = Some(ty),
+                }
+            }
+            Ok(Type::List(Box::new(element_ty.unwrap_or(Type::Any))))
         }
         Expr::Mapper { mapper, key: true } => Ok(Type::KeyMapperWitness(Box::new(
             MapperType::Known(mapper.clone()),
@@ -86,7 +69,7 @@ fn infer_expr_with_state(
                     |annotation| annotate_lambda_parameters((*case.expr).clone(), annotation),
                 );
                 let inferred =
-                    infer_expr_with_state(&expression, tables, environment, &mut case_state)?;
+                    infer_expr_with_state(&expression, environment, &mut case_state)?;
                 types.push(apply_annotation(inferred, case.annotation.as_ref())?);
                 successful_states.push(case_state);
             }
@@ -106,78 +89,20 @@ fn infer_expr_with_state(
                 .unwrap_or_else(|| state.fresh_type());
             let mut scoped = environment.clone();
             scoped.insert(param.clone(), parameter_ty.clone());
-            // A braced projection is parsed as `row => { ... }`. Its
-            // compatibility `Projection` node represents the record body,
-            // rather than another function layer.
-            if let Expr::Projection(fields) = body.as_ref() {
-                let output = Row::new(
-                    fields
-                        .iter()
-                        .map(|field| Column {
-                            name: field.alias.clone(),
-                            ty: Type::Any,
-                        })
-                        .collect(),
-                );
-                return Ok(Type::Function(
-                    Box::new(parameter_ty),
-                    Box::new(Type::Record(output)),
-                ));
-            }
-            let body_ty = infer_expr_with_state(body, tables, &scoped, state)?;
+            let body_ty = infer_expr_with_state(body, &scoped, state)?;
             Ok(Type::Function(Box::new(parameter_ty), Box::new(body_ty)))
         }
-        Expr::Apply { .. } => infer_application(expr, tables, environment, state),
+        Expr::Apply { .. } => infer_application(expr, environment, state),
         Expr::Let { name, value, body } => {
-            let value_ty = infer_expr_with_state(value, tables, environment, state)?;
+            let value_ty = infer_expr_with_state(value, environment, state)?;
             let mut scoped = environment.clone();
             scoped.insert(name.clone(), value_ty);
-            infer_expr_with_state(body, tables, &scoped, state)
-        }
-        Expr::Binary { left, right, .. } => {
-            let _ = infer_expr_with_state(left, tables, environment, state)?;
-            let _ = infer_expr_with_state(right, tables, environment, state)?;
-            Ok(Type::Bool)
-        }
-        Expr::Source(name) => tables
-            .get(name.as_str())
-            .map(|row| Type::Relation((*row).clone()))
-            .ok_or_else(|| TypeError::new(format!("unknown table '{name}'"))),
-        Expr::Where { input, predicate } => {
-            let row = expect_relation(infer_expr_with_state(input, tables, environment, state)?)?;
-            check_predicate(&row, predicate)?;
-            Ok(Type::Relation(row))
-        }
-        Expr::Select { input, fields } => {
-            let row = expect_relation(infer_expr_with_state(input, tables, environment, state)?)?;
-            Ok(Type::Relation(select_row(&row, fields)?))
-        }
-        Expr::MapKey { input, mapper } => Ok(Type::Relation(
-            expect_relation(infer_expr_with_state(input, tables, environment, state)?)?
-                .map_key(mapper),
-        )),
-        Expr::MapValue { input, mapper } => Ok(Type::Relation(
-            expect_relation(infer_expr_with_state(input, tables, environment, state)?)?
-                .map_value(mapper),
-        )),
-        Expr::Merge { older, newer } => {
-            let older = infer_expr_with_state(older, tables, environment, state)?;
-            let newer = infer_expr_with_state(newer, tables, environment, state)?;
-            let older = row_expr_from_type(&older)
-                .ok_or_else(|| TypeError::new(format!("expected a relation, got {older}")))?;
-            let newer = row_expr_from_type(&newer)
-                .ok_or_else(|| TypeError::new(format!("expected a relation, got {newer}")))?;
-            Ok(type_from_row_expr(RowExpr::Merge(
-                Box::new(older),
-                Box::new(newer),
-            )))
+            infer_expr_with_state(body, &scoped, state)
         }
     }
 }
-
 fn infer_application(
     expr: &Expr,
-    tables: &HashMap<&str, &Row>,
     environment: &HashMap<String, Type>,
     state: &mut InferState,
 ) -> Result<Type, TypeError> {
@@ -203,16 +128,16 @@ fn infer_application(
                 },
             };
         }
-        return infer_expr_with_state(&reduced, tables, environment, state);
+        return infer_expr_with_state(&reduced, environment, state);
     }
     if let Expr::Var(name) = head {
         match name.as_str() {
             "__table" => {
                 if arguments.len() != 2 {
-                    return Ok(primitive_value_type(name).unwrap());
+                    return Ok(Type::Any);
                 }
                 for argument in &arguments {
-                    let argument_ty = infer_expr_with_state(argument, tables, environment, state)?;
+                    let argument_ty = infer_expr_with_state(argument, environment, state)?;
                     if !matches!(argument_ty, Type::String | Type::Any | Type::Variable(_)) {
                         return Err(TypeError::new("table expects a schema name and table name"));
                     }
@@ -226,11 +151,11 @@ fn infer_application(
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
-                let relation_ty = infer_expr_with_state(arguments[1], tables, environment, state)?;
+                let relation_ty = infer_expr_with_state(arguments[1], environment, state)?;
                 let row_expr = relation_row_expr(relation_ty, state)?;
                 let row = row_expr.normalize().unwrap_or_default();
                 let mut predicate_ty =
-                    infer_expr_with_state(arguments[0], tables, environment, state)?;
+                    infer_expr_with_state(arguments[0], environment, state)?;
                 if matches!(predicate_ty, Type::Variable(_)) {
                     let expected = Type::Function(
                         Box::new(type_from_bare_row_expr(row_expr.clone())),
@@ -243,8 +168,7 @@ fn infer_application(
                     unify_types(*output, Type::Bool, state)?;
                     unify_types(*input, type_from_bare_row_expr(row_expr.clone()), state)?;
                     if row_expr.normalize().is_some() && !matches!(arguments[0], Expr::Var(_)) {
-                        let predicate = predicate_value(arguments[0])?;
-                        check_predicate(&row, &predicate)?;
+                        check_row_expression(arguments[0], &row)?;
                     }
                 } else {
                     return Err(TypeError::new(format!(
@@ -257,10 +181,10 @@ fn infer_application(
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
-                let relation_ty = infer_expr_with_state(arguments[1], tables, environment, state)?;
+                let relation_ty = infer_expr_with_state(arguments[1], environment, state)?;
                 let input_row = relation_row_expr(relation_ty, state)?;
                 let mut projection_ty =
-                    infer_expr_with_state(arguments[0], tables, environment, state)?;
+                    infer_expr_with_state(arguments[0], environment, state)?;
                 if matches!(projection_ty, Type::Variable(_)) {
                     let expected = Type::Function(
                         Box::new(type_from_bare_row_expr(input_row.clone())),
@@ -276,8 +200,24 @@ fn infer_application(
                 };
                 unify_types(*input, type_from_bare_row_expr(input_row.clone()), state)?;
                 let visible_input = input_row.normalize().unwrap_or_default();
-                if let Some(fields) = projection_fields(arguments[0]) {
-                    let selected = select_row(&visible_input, fields)?;
+                if let Some((param, fields)) = row_literal_fields(arguments[0]) {
+                    let mut scope = HashMap::new();
+                    scope.insert(param, &visible_input);
+                    let mut columns = Vec::with_capacity(fields.len());
+                    for (name, value) in fields {
+                        // Named row functions are validated where they are
+                        // defined; inline values are checked against the row.
+                        let ty = if matches!(value, Expr::Var(_)) {
+                            Type::Any
+                        } else {
+                            row_expression_type(value, &scope)?
+                        };
+                        columns.push(Column {
+                            name: name.clone(),
+                            ty,
+                        });
+                    }
+                    let selected = Row::new(columns);
                     unify_types(*output, Type::Record(selected.clone()), state)?;
                     return Ok(Type::Relation(selected));
                 }
@@ -288,13 +228,13 @@ fn infer_application(
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
-                let relation_ty = infer_expr_with_state(arguments[1], tables, environment, state)?;
+                let relation_ty = infer_expr_with_state(arguments[1], environment, state)?;
                 let Some(row) = row_expr_from_type(&relation_ty) else {
                     return Err(TypeError::new(format!(
                         "expected a relation, got {relation_ty}"
                     )));
                 };
-                let mapper_ty = infer_expr_with_state(arguments[0], tables, environment, state)?;
+                let mapper_ty = infer_expr_with_state(arguments[0], environment, state)?;
                 let mapper = mapper_value(arguments[0])
                     .map(MapperType::Known)
                     .or_else(|_| match mapper_ty {
@@ -314,13 +254,13 @@ fn infer_application(
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
-                let relation_ty = infer_expr_with_state(arguments[1], tables, environment, state)?;
+                let relation_ty = infer_expr_with_state(arguments[1], environment, state)?;
                 let Some(row) = row_expr_from_type(&relation_ty) else {
                     return Err(TypeError::new(format!(
                         "expected a relation, got {relation_ty}"
                     )));
                 };
-                let mapper_ty = infer_expr_with_state(arguments[0], tables, environment, state)?;
+                let mapper_ty = infer_expr_with_state(arguments[0], environment, state)?;
                 let mapper = mapper_value(arguments[0])
                     .map(MapperType::Known)
                     .or_else(|_| match mapper_ty {
@@ -340,10 +280,10 @@ fn infer_application(
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
-                let relation_ty = infer_expr_with_state(arguments[1], tables, environment, state)?;
+                let relation_ty = infer_expr_with_state(arguments[1], environment, state)?;
                 let input_row = relation_row_expr(relation_ty, state)?;
                 let mut projection_ty =
-                    infer_expr_with_state(arguments[0], tables, environment, state)?;
+                    infer_expr_with_state(arguments[0], environment, state)?;
                 if matches!(projection_ty, Type::Variable(_)) {
                     let expected = Type::Function(
                         Box::new(type_from_bare_row_expr(input_row.clone())),
@@ -359,9 +299,11 @@ fn infer_application(
                 };
                 unify_types(*input, type_from_bare_row_expr(input_row.clone()), state)?;
                 let visible_input = input_row.normalize().unwrap_or_default();
-                if let Expr::AggregateProjection(fields) = arguments[0] {
-                    let result = aggregate_row(&visible_input, fields)?;
-                    unify_types(*output, Type::Record(result.clone()), state)?;
+                if let Some(extracted) = aggregate_fields(arguments[0]) {
+                    let fields = extracted?;
+                    // The aggregate result is authoritative; the lambda's
+                    // inferred body still carries the raw constructor types.
+                    let result = aggregate_row(&visible_input, &fields)?;
                     return Ok(Type::Relation(result));
                 }
                 return relation_of_row_type(resolve_type(*output, &state.substitutions))
@@ -374,23 +316,23 @@ fn infer_application(
                         Box::new(Type::Relation(Row::default())),
                     ));
                 }
-                let right = match infer_expr_with_state(arguments[0], tables, environment, state)? {
+                let right = match infer_expr_with_state(arguments[0], environment, state)? {
                     Type::Relation(row) => row,
                     Type::Any | Type::Variable(_) | Type::RelationVariable(_) => Row::default(),
                     other => {
                         return Err(TypeError::new(format!("expected a relation, got {other}")))
                     }
                 };
-                let left = match infer_expr_with_state(arguments[2], tables, environment, state)? {
+                let left = match infer_expr_with_state(arguments[2], environment, state)? {
                     Type::Relation(row) => row,
                     Type::Any | Type::Variable(_) | Type::RelationVariable(_) => Row::default(),
                     other => {
                         return Err(TypeError::new(format!("expected a relation, got {other}")))
                     }
                 };
-                let _ = infer_expr_with_state(arguments[1], tables, environment, state)?;
+                let _ = infer_expr_with_state(arguments[1], environment, state)?;
                 if matches!(arguments[1], Expr::Lambda { .. }) {
-                    check_join_predicate(arguments[1], &left, &right)?;
+                    check_join_row_expression(arguments[1], &left, &right)?;
                 }
                 return Ok(Type::Relation(join_result_row(&left, &right, name)));
             }
@@ -398,8 +340,8 @@ fn infer_application(
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
-                let older_ty = infer_expr_with_state(arguments[0], tables, environment, state)?;
-                let newer_ty = infer_expr_with_state(arguments[1], tables, environment, state)?;
+                let older_ty = infer_expr_with_state(arguments[0], environment, state)?;
+                let newer_ty = infer_expr_with_state(arguments[1], environment, state)?;
                 let Some(older) = row_expr_from_type(&older_ty) else {
                     return Err(TypeError::new(format!(
                         "expected a relation, got {older_ty}"
@@ -415,6 +357,74 @@ fn infer_application(
                     Box::new(newer),
                 )));
             }
+            "__asc" | "__desc" => {
+                if arguments.len() != 1 {
+                    return Ok(Type::Direction);
+                }
+                let value_ty = infer_expr_with_state(arguments[0], environment, state)?;
+                if !is_orderable_type(&value_ty) {
+                    return Err(TypeError::new(format!(
+                        "order keys must be orderable values (int, float, string, bool, date, or timestamp), got {value_ty}"
+                    )));
+                }
+                return Ok(Type::Direction);
+            }
+            "__order" => {
+                if arguments.len() != 2 {
+                    return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
+                }
+                let relation_ty = infer_expr_with_state(arguments[1], environment, state)?;
+                let row_expr = relation_row_expr(relation_ty, state)?;
+                let row = row_expr.normalize().unwrap_or_default();
+                let mut keys_ty = infer_expr_with_state(arguments[0], environment, state)?;
+                if matches!(keys_ty, Type::Variable(_)) {
+                    let expected = Type::Function(
+                        Box::new(type_from_bare_row_expr(row_expr.clone())),
+                        Box::new(Type::List(Box::new(Type::Direction))),
+                    );
+                    unify_types(keys_ty.clone(), expected, state)?;
+                    keys_ty = resolve_type(keys_ty, &state.substitutions);
+                }
+                let Type::Function(input, output) = keys_ty else {
+                    return Err(TypeError::new(format!(
+                        "order expects a row-to-list-of-directions function, got {keys_ty}"
+                    )));
+                };
+                unify_types(*input, type_from_bare_row_expr(row_expr.clone()), state)?;
+                if let Type::List(element) = resolve_type(*output, &state.substitutions) {
+                    if !matches!(
+                        element.as_ref(),
+                        Type::Direction | Type::Any | Type::Variable(_)
+                    ) {
+                        return Err(TypeError::new(format!(
+                            "order keys must be asc or desc values, got list of {element}"
+                        )));
+                    }
+                }
+                if row_expr.normalize().is_some() && !matches!(arguments[0], Expr::Var(_)) {
+                    check_row_expression(arguments[0], &row)?;
+                }
+                return Ok(type_from_row_expr(row_expr));
+            }
+            "__limit" => {
+                if arguments.len() != 2 {
+                    return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
+                }
+                match arguments[0] {
+                    Expr::Literal(Literal::Integer(count)) if *count >= 0 => {}
+                    // A named count is only validated where its definition is
+                    // visible; the SQL lowerer requires a literal there.
+                    Expr::Var(_) => {}
+                    _ => {
+                        return Err(TypeError::new(
+                            "limit expects a non-negative integer literal",
+                        ))
+                    }
+                }
+                let relation_ty = infer_expr_with_state(arguments[1], environment, state)?;
+                let row_expr = relation_row_expr(relation_ty, state)?;
+                return Ok(type_from_row_expr(row_expr));
+            }
             _ => {}
         }
     }
@@ -422,8 +432,8 @@ fn infer_application(
         Expr::Apply { function, argument } => (function, argument),
         _ => unreachable!(),
     };
-    let function_ty = infer_expr_with_state(function, tables, environment, state)?;
-    let argument_ty = infer_expr_with_state(argument, tables, environment, state)?;
+    let function_ty = infer_expr_with_state(function, environment, state)?;
+    let argument_ty = infer_expr_with_state(argument, environment, state)?;
     match function_ty {
         Type::Overloaded(candidates) => {
             let mut matches = Vec::new();
@@ -451,18 +461,21 @@ fn infer_application(
     }
 }
 
-fn projection_fields(expr: &Expr) -> Option<&Vec<SelectField>> {
+/// The row literal behind a select projection: either the literal itself or
+/// a single-row lambda whose body is one. The lambda parameter names the row
+/// its field expressions read from.
+fn row_literal_fields(expr: &Expr) -> Option<(&str, &Vec<(String, Expr)>)> {
     match expr {
-        Expr::Projection(fields) => Some(fields),
-        Expr::Lambda { body, .. } => match body.as_ref() {
-            Expr::Projection(fields) => Some(fields),
+        Expr::RowLiteral(fields) => Some(("row", fields)),
+        Expr::Lambda { param, body, .. } => match body.as_ref() {
+            Expr::RowLiteral(fields) => Some((param.as_str(), fields)),
             _ => None,
         },
         _ => None,
     }
 }
 
-pub(super) fn substitute(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
+pub fn substitute(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
     match expr {
         Expr::Var(variable) if variable == name => replacement.clone(),
         Expr::Apply { function, argument } => Expr::Apply {
@@ -495,31 +508,18 @@ pub(super) fn substitute(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
             target: Box::new(substitute(target, name, replacement)),
             field: field.clone(),
         },
-        Expr::Binary { op, left, right } => Expr::Binary {
-            op: op.clone(),
-            left: Box::new(substitute(left, name, replacement)),
-            right: Box::new(substitute(right, name, replacement)),
-        },
-        Expr::Where { input, predicate } => Expr::Where {
-            input: Box::new(substitute(input, name, replacement)),
-            predicate: predicate.clone(),
-        },
-        Expr::Select { input, fields } => Expr::Select {
-            input: Box::new(substitute(input, name, replacement)),
-            fields: fields.clone(),
-        },
-        Expr::MapKey { input, mapper } => Expr::MapKey {
-            input: Box::new(substitute(input, name, replacement)),
-            mapper: mapper.clone(),
-        },
-        Expr::MapValue { input, mapper } => Expr::MapValue {
-            input: Box::new(substitute(input, name, replacement)),
-            mapper: mapper.clone(),
-        },
-        Expr::Merge { older, newer } => Expr::Merge {
-            older: Box::new(substitute(older, name, replacement)),
-            newer: Box::new(substitute(newer, name, replacement)),
-        },
+        Expr::List(elements) => Expr::List(
+            elements
+                .iter()
+                .map(|element| substitute(element, name, replacement))
+                .collect(),
+        ),
+        Expr::RowLiteral(fields) => Expr::RowLiteral(
+            fields
+                .iter()
+                .map(|(field, value)| (field.clone(), substitute(value, name, replacement)))
+                .collect(),
+        ),
         Expr::Overloaded(cases) => Expr::Overloaded(
             cases
                 .iter()

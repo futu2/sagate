@@ -40,66 +40,31 @@ fn resolve_prelude_operations(
     definitions: &HashMap<String, Expr>,
 ) -> Result<(), String> {
     match expr {
+        // Primitives must be declared by the prelude; user code may reference
+        // a declared primitive (to build a custom combinator) but never an
+        // unknown one.
+        Expr::Var(name) if name.starts_with("__") && !definitions.contains_key(name) => {
+            return Err(format!("unknown primitive '{name}'"));
+        }
         Expr::Var(name) if is_infix_operator(name) => {
             let primitive = primitive_head(&Expr::Var(name.clone()), definitions, &mut Vec::new());
-            if primitive.as_deref().and_then(comparison_operator).is_some() {
+            if primitive.as_deref().is_some_and(is_scalar_primitive) {
                 *name = primitive.unwrap();
             }
         }
-        Expr::Predicate(predicate) => {
-            if let CompareOp::Named(name) = &predicate.op {
-                let primitive =
-                    primitive_head(&Expr::Var(name.clone()), definitions, &mut Vec::new());
-                predicate.op = primitive
-                    .as_deref()
-                    .and_then(comparison_operator)
-                    .ok_or_else(|| format!("unknown comparison operator '{name}'"))?;
+        Expr::RowLiteral(fields) => {
+            for (_, value) in fields {
+                resolve_prelude_operations(value, definitions)?;
             }
         }
-        Expr::AggregateProjection(fields) => {
-            for field in fields {
-                let AggregateOp::Named(name) = &field.operation else {
-                    continue;
-                };
-                let primitive =
-                    primitive_head(&Expr::Var(name.clone()), definitions, &mut Vec::new())
-                        .ok_or_else(|| format!("unknown aggregate '{name}'"))?;
-                let operation = match primitive.as_str() {
-                    "__group" => AggregateOp::Group,
-                    "__count" => AggregateOp::Count,
-                    "__sum" => AggregateOp::Sum,
-                    "__avg" => AggregateOp::Avg,
-                    "__min" => AggregateOp::Min,
-                    "__max" => AggregateOp::Max,
-                    _ => return Err(format!("unknown aggregate '{name}'")),
-                };
-                if field.field.is_none() && !matches!(operation, AggregateOp::Count) {
-                    return Err("aggregate expects a field reference".to_owned());
-                }
-                field.operation = operation;
-            }
-        }
-        Expr::Apply { function, argument }
-        | Expr::Binary {
-            left: function,
-            right: argument,
-            ..
-        } => {
+        Expr::Apply { function, argument } => {
             resolve_prelude_operations(function, definitions)?;
             resolve_prelude_operations(argument, definitions)?;
         }
         Expr::Lambda { body, .. }
         | Expr::Annotated { expr: body, .. }
-        | Expr::Access { target: body, .. }
-        | Expr::Where { input: body, .. }
-        | Expr::Select { input: body, .. }
-        | Expr::MapKey { input: body, .. }
-        | Expr::MapValue { input: body, .. } => resolve_prelude_operations(body, definitions)?,
-        Expr::Let { value, body, .. }
-        | Expr::Merge {
-            older: value,
-            newer: body,
-        } => {
+        | Expr::Access { target: body, .. } => resolve_prelude_operations(body, definitions)?,
+        Expr::Let { value, body, .. } => {
             resolve_prelude_operations(value, definitions)?;
             resolve_prelude_operations(body, definitions)?;
         }
@@ -114,9 +79,11 @@ fn resolve_prelude_operations(
 }
 
 pub fn parse(source: &str) -> Result<Program, String> {
-    let mut program = Parser::new(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/prelude.sagate")))?.parse_program()?;
+    let mut program =
+        Parser::new(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/prelude.sagate")))?
+            .allowing_primitives()
+            .parse_program()?;
     let user = Parser::new(source)?.parse_program()?;
-    program.tables.extend(user.tables);
     for mut binding in user.bindings {
         if let Some(index) = program
             .bindings

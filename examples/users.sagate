@@ -1,16 +1,21 @@
-users : query { id: int, displayName: string, active: bool } =
+users : query { id = int, displayName = string, active = bool } =
   table "public" "users"
 
 active_users = users
   & where (.active == true)
   & mapKey snake
-  & select { id: .id, name: .display_name }
+  & select { id = .id, name = .display_name }
 
 nullable_users = users
   & mapValue maybe
-  & select { id: .id, name: .displayName }
+  & select { id = .id, name = .displayName }
 
-user_names : query { id: int, name: string } = table "public" "user_names"
+user_names : query { id = int, name = string } = table "public" "user_names"
 
 combined = merge users user_names
-  & select { id: .id, name: .name }
+  & select { id = .id, name = .name }
+
+recent_active = users
+  & where (.active == true)
+  & order [desc .displayName, asc .id]
+  & limit 10

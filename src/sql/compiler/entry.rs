@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::lang::{
-    type_check, AggregateField, AggregateOp, Column, CompareOp, Expr, Literal, Mapper, Predicate,
-    Program, Row, SelectField,
+    flatten_apply, substitute, type_check, AggregateField, AggregateOp, Column, Expr, Literal,
+    Mapper, Program, Row,
 };
 
 use super::model::{CompileError, CompiledQuery, Relation};
@@ -19,35 +19,48 @@ pub fn compile_with_dialect(
         .ok_or_else(|| format!("unknown SQL dialect '{dialect}'"))?;
     // Type checking validates all row labels before SQL generation.
     let known_rows = type_check(program).map_err(|error| error.to_string())?;
-    let tables: HashMap<_, _> = program
-        .tables
-        .iter()
-        .map(|table| (table.name.as_str(), &table.row))
-        .collect();
     let definitions: HashMap<String, &Expr> = program
         .bindings
         .iter()
         .map(|binding| (binding.name.clone(), &binding.expr))
         .collect();
+    // CTE names are numbered from one shared counter, so every step in a
+    // pipeline (and across pipelines) lifts its input under a fresh name.
+    let mut counter = 0u32;
     let mut result = Vec::with_capacity(known_rows.len());
     for binding in &program.bindings {
         if let Some(row) = known_rows.get(&binding.name) {
             let mut relation = compile_expr(
                 &binding.expr,
-                &tables,
                 &definitions,
                 &HashMap::new(),
                 &known_rows,
+                &mut counter,
             )?;
             relation.row = row.clone();
+            let statement = attach_ctes(relation.statement, relation.ctes);
+            // sqlglot's passes (constant folding, boolean simplification,
+            // limit-aware predicate pushdown) run over the flat CTE chain.
+            let statement = sqlglot_rust::optimizer::optimize(*statement)
+                .map_err(|error| error.to_string())?;
             result.push(CompiledQuery {
                 name: binding.name.clone(),
-                sql: render_sql(relation.statement, dialect),
+                sql: render_sql(Box::new(statement), dialect),
                 row: relation.row,
             });
         }
     }
     Ok(result)
+}
+
+/// Attach the accumulated CTE chain to the statement that renders it.
+fn attach_ctes(mut statement: Box<Statement>, ctes: Vec<Cte>) -> Box<Statement> {
+    if !ctes.is_empty() {
+        if let Statement::Select(select) = statement.as_mut() {
+            select.ctes = ctes;
+        }
+    }
+    statement
 }
 
 // The generator recursively walks nested subqueries. Keep that walk off the
@@ -64,21 +77,25 @@ fn render_sql(statement: Box<sqlglot_rust::ast::Statement>, dialect: sqlglot_rus
 
 fn compile_expr(
     expr: &Expr,
-    tables: &HashMap<&str, &Row>,
     definitions: &HashMap<String, &Expr>,
     locals: &HashMap<String, Relation>,
     known_rows: &HashMap<String, Row>,
+    counter: &mut u32,
 ) -> Result<Relation, String> {
     match expr {
-        Expr::Apply { .. } => compile_application(expr, tables, definitions, locals, known_rows),
+        Expr::Apply { .. } => {
+            compile_application(expr, definitions, locals, known_rows, counter)
+        }
         Expr::Let { name, value, body } => {
             // Let is beta-reduced at this boundary. This supports both
             // relation bindings and local function values without introducing
             // an imperative runtime environment into SQL lowering.
             let reduced = substitute(body, name, value);
-            compile_expr(&reduced, tables, definitions, locals, known_rows)
+            compile_expr(&reduced, definitions, locals, known_rows, counter)
         }
-        Expr::Annotated { expr, .. } => compile_expr(expr, tables, definitions, locals, known_rows),
+        Expr::Annotated { expr, .. } => {
+            compile_expr(expr, definitions, locals, known_rows, counter)
+        }
         Expr::Var(name) => {
             if let Some(value) = locals.get(name) {
                 return Ok(value.clone());
@@ -86,54 +103,29 @@ fn compile_expr(
             let value = definitions
                 .get(name)
                 .ok_or_else(|| format!("unknown variable '{name}'"))?;
-            let mut relation = compile_expr(value, tables, definitions, locals, known_rows)?;
+            let mut relation = compile_expr(value, definitions, locals, known_rows, counter)?;
             if let Some(row) = known_rows.get(name) {
                 relation.row = row.clone();
             }
             Ok(relation)
         }
-        Expr::Table(name) => compile_table(name, tables).map_err(|error| error.to_string()),
-        Expr::Source(name) => compile_table(name, tables).map_err(|error| error.to_string()),
-        Expr::Where { input, predicate } => {
-            let inner = compile_expr(input, tables, definitions, locals, known_rows)?;
-            compile_where(inner, predicate).map_err(|error| error.to_string())
-        }
-        Expr::Select { input, fields } => {
-            let inner = compile_expr(input, tables, definitions, locals, known_rows)?;
-            compile_select(inner, fields).map_err(|error| error.to_string())
-        }
-        Expr::MapKey { input, mapper } => {
-            let inner = compile_expr(input, tables, definitions, locals, known_rows)?;
-            compile_map_key(inner, mapper).map_err(|error| error.to_string())
-        }
-        Expr::MapValue { input, mapper } => {
-            let inner = compile_expr(input, tables, definitions, locals, known_rows)?;
-            compile_map_value(inner, mapper).map_err(|error| error.to_string())
-        }
-        Expr::Merge { older, newer } => {
-            let left = compile_expr(older, tables, definitions, locals, known_rows)?;
-            let right = compile_expr(newer, tables, definitions, locals, known_rows)?;
-            compile_merge(left, right).map_err(|error| error.to_string())
-        }
-        Expr::Predicate(_)
-        | Expr::Projection(_)
-        | Expr::AggregateProjection(_)
+        Expr::RowLiteral(_)
+        | Expr::List(_)
         | Expr::Mapper { .. }
         | Expr::Overloaded(_)
         | Expr::Literal(_)
         | Expr::Field(_)
         | Expr::Access { .. }
-        | Expr::Binary { .. }
         | Expr::Lambda { .. } => Err("expression does not produce a relation".to_owned()),
     }
 }
 
 fn compile_application(
     expr: &Expr,
-    tables: &HashMap<&str, &Row>,
     definitions: &HashMap<String, &Expr>,
     locals: &HashMap<String, Relation>,
     known_rows: &HashMap<String, Row>,
+    counter: &mut u32,
 ) -> Result<Relation, String> {
     let (head, arguments) = flatten_apply(expr);
     if let Expr::Overloaded(cases) = head {
@@ -146,7 +138,7 @@ fn compile_application(
                     argument: Box::new((*argument).clone()),
                 };
             }
-            match compile_expr(&expanded, tables, definitions, locals, known_rows) {
+            match compile_expr(&expanded, definitions, locals, known_rows, counter) {
                 Ok(relation) => return Ok(relation),
                 Err(error) => last_error = Some(error),
             }
@@ -171,7 +163,7 @@ fn compile_application(
                 },
             };
         }
-        return compile_expr(&reduced, tables, definitions, locals, known_rows);
+        return compile_expr(&reduced, definitions, locals, known_rows, counter);
     }
     let Expr::Var(name) = head else {
         return Err("only prelude functions can produce SQL relations".to_owned());
@@ -193,58 +185,99 @@ fn compile_application(
             if arguments.len() != 2 {
                 return Err("where expects a predicate and a relation".to_owned());
             }
-            let inner = compile_expr(arguments[1], tables, definitions, locals, known_rows)?;
-            let predicate = predicate_value(arguments[0], definitions)?;
-            compile_where(inner, &predicate).map_err(|error| error.to_string())
+            let inner =
+                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+            let condition = where_condition(arguments[0], &inner.row, definitions)
+                .map_err(|error| error.to_string())?;
+            compile_where(inner, condition, counter).map_err(|error| error.to_string())
         }
         "__select" => {
             if arguments.len() != 2 {
                 return Err("select expects a projection and a relation".to_owned());
             }
-            let inner = compile_expr(arguments[1], tables, definitions, locals, known_rows)?;
-            let fields = projection_value(arguments[0])?;
-            compile_select(inner, fields).map_err(|error| error.to_string())
+            let inner =
+                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+            let (param, fields) = projection_value(arguments[0])?;
+            compile_select(inner, param, fields, definitions, counter)
+                .map_err(|error| error.to_string())
         }
         "__mapKey" => {
             if arguments.len() != 2 {
                 return Err("mapKey expects a mapper and a relation".to_owned());
             }
-            let inner = compile_expr(arguments[1], tables, definitions, locals, known_rows)?;
+            let inner =
+                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
             let mapper = mapper_value(arguments[0], true, definitions)?;
-            compile_map_key(inner, &mapper).map_err(|error| error.to_string())
+            compile_map_key(inner, &mapper, counter).map_err(|error| error.to_string())
         }
         "__mapValue" => {
             if arguments.len() != 2 {
                 return Err("mapValue expects a mapper and a relation".to_owned());
             }
-            let inner = compile_expr(arguments[1], tables, definitions, locals, known_rows)?;
+            let inner =
+                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
             let mapper = mapper_value(arguments[0], false, definitions)?;
-            compile_map_value(inner, &mapper).map_err(|error| error.to_string())
+            compile_map_value(inner, &mapper, counter).map_err(|error| error.to_string())
         }
         "__agg" => {
             if arguments.len() != 2 {
                 return Err("agg expects a projection and a relation".to_owned());
             }
-            let inner = compile_expr(arguments[1], tables, definitions, locals, known_rows)?;
-            let fields = aggregate_projection(arguments[0])?;
-            compile_aggregate(inner, fields).map_err(|error| error.to_string())
+            let inner =
+                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+            let fields = aggregate_projection(arguments[0], definitions)?;
+            compile_aggregate(inner, &fields, counter).map_err(|error| error.to_string())
         }
         "__joinInner" | "__joinLeft" | "__joinRight" | "__joinFull" => {
             if arguments.len() != 3 {
                 return Err("join expects a right query, predicate, and left query".to_owned());
             }
-            let right = compile_expr(arguments[0], tables, definitions, locals, known_rows)?;
-            let predicate = join_predicate_value(arguments[1], definitions)?;
-            let left = compile_expr(arguments[2], tables, definitions, locals, known_rows)?;
-            compile_join(left, right, &predicate, name).map_err(|error| error.to_string())
+            let right =
+                compile_expr(arguments[0], definitions, locals, known_rows, counter)?;
+            let left =
+                compile_expr(arguments[2], definitions, locals, known_rows, counter)?;
+            let condition = join_condition(arguments[1], &left.row, &right.row, definitions)
+                .map_err(|error| error.to_string())?;
+            compile_join(left, right, condition, name, counter).map_err(|error| error.to_string())
         }
         "__merge" => {
             if arguments.len() != 2 {
                 return Err("merge expects two relations".to_owned());
             }
-            let left = compile_expr(arguments[0], tables, definitions, locals, known_rows)?;
-            let right = compile_expr(arguments[1], tables, definitions, locals, known_rows)?;
-            compile_merge(left, right).map_err(|error| error.to_string())
+            let left =
+                compile_expr(arguments[0], definitions, locals, known_rows, counter)?;
+            let right =
+                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+            compile_merge(left, right, counter).map_err(|error| error.to_string())
+        }
+        "__order" => {
+            if arguments.len() != 2 {
+                return Err("order expects sort keys and a relation".to_owned());
+            }
+            let inner =
+                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+            let items = order_by_items(arguments[0], &inner.row, definitions)?;
+            compile_order(inner, items, counter).map_err(|error| error.to_string())
+        }
+        "__limit" => {
+            if arguments.len() != 2 {
+                return Err("limit expects a count and a relation".to_owned());
+            }
+            let mut count_expr = arguments[0];
+            while let Expr::Var(name) = count_expr {
+                count_expr = definitions
+                    .get(name)
+                    .ok_or_else(|| format!("unknown variable '{name}'"))?;
+            }
+            let Expr::Literal(Literal::Integer(count)) = count_expr else {
+                return Err("limit expects an integer literal".to_owned());
+            };
+            if *count < 0 {
+                return Err("limit expects a non-negative integer".to_owned());
+            }
+            let inner =
+                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+            compile_limit(inner, *count, counter).map_err(|error| error.to_string())
         }
         _ => {
             let definition = definitions
@@ -260,69 +293,8 @@ fn compile_application(
                     argument: Box::new(argument.clone()),
                 };
             }
-            compile_expr(&expanded, tables, definitions, locals, known_rows)
+            compile_expr(&expanded, definitions, locals, known_rows, counter)
         }
     }
 }
 
-fn substitute(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
-    match expr {
-        Expr::Var(variable) if variable == name => replacement.clone(),
-        Expr::Apply { function, argument } => Expr::Apply {
-            function: Box::new(substitute(function, name, replacement)),
-            argument: Box::new(substitute(argument, name, replacement)),
-        },
-        Expr::Lambda {
-            param,
-            annotation,
-            body,
-        } if param != name => Expr::Lambda {
-            param: param.clone(),
-            annotation: annotation.clone(),
-            body: Box::new(substitute(body, name, replacement)),
-        },
-        Expr::Let {
-            name: binding,
-            value,
-            body,
-        } if binding != name => Expr::Let {
-            name: binding.clone(),
-            value: Box::new(substitute(value, name, replacement)),
-            body: Box::new(substitute(body, name, replacement)),
-        },
-        Expr::Annotated { expr, ty } => Expr::Annotated {
-            expr: Box::new(substitute(expr, name, replacement)),
-            ty: ty.clone(),
-        },
-        Expr::Access { target, field } => Expr::Access {
-            target: Box::new(substitute(target, name, replacement)),
-            field: field.clone(),
-        },
-        Expr::Binary { op, left, right } => Expr::Binary {
-            op: op.clone(),
-            left: Box::new(substitute(left, name, replacement)),
-            right: Box::new(substitute(right, name, replacement)),
-        },
-        Expr::Overloaded(cases) => Expr::Overloaded(
-            cases
-                .iter()
-                .map(|case| crate::lang::OverloadCase {
-                    annotation: case.annotation.clone(),
-                    expr: Box::new(substitute(&case.expr, name, replacement)),
-                })
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
-fn flatten_apply(expr: &Expr) -> (&Expr, Vec<&Expr>) {
-    let mut args = Vec::new();
-    let mut current = expr;
-    while let Expr::Apply { function, argument } = current {
-        args.push(argument.as_ref());
-        current = function;
-    }
-    args.reverse();
-    (current, args)
-}

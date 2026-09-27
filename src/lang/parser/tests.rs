@@ -5,11 +5,11 @@ use crate::lang::type_check;
 fn parses_forward_application_as_an_ordinary_infix_application() {
     let program = parse(
         r#"
-            users : query { id: Int, displayName: String, active: Bool } = table "public" "users"
+            users : query { id = Int, displayName = String, active = Bool } = table "public" "users"
             active = users
               & where (.active == true)
               & mapKey(snake)
-              & select { id: .id, name: .display_name };
+              & select { id = .id, name = .display_name };
             "#,
     )
     .expect("parse");
@@ -27,9 +27,9 @@ fn parses_forward_application_as_an_ordinary_infix_application() {
 #[test]
 fn application_and_composition_operators_are_available() {
     let program = parse(
-        "users : query { id: Int, active: Bool } = table \"public\" \"users\"\n\
-             q = ((where (.active == true)) >>> (select { id: .id })) $ users\n\
-             q2 = ((select { id: .id }) <<< (where (.active == true))) $ users\n",
+        "users : query { id = Int, active = Bool } = table \"public\" \"users\"\n\
+             q = ((where (.active == true)) >>> (select { id = .id })) $ users\n\
+             q2 = ((select { id = .id }) <<< (where (.active == true))) $ users\n",
     )
     .expect("parse");
     assert!(program.bindings.iter().any(|binding| binding.name == "&"));
@@ -85,15 +85,20 @@ fn forward_application_remains_an_infix_ast_node() {
 #[test]
 fn removed_pipeline_token_is_rejected() {
     assert!(parse(
-        "users : query { id: Int } = table \"public\" \"users\"\nq = users |> select { id: .id }\n"
+        "users : query { id = Int } = table \"public\" \"users\"\nq = users |> select { id = .id }\n"
     )
     .is_err());
 }
 
 #[test]
-fn removed_query_and_from_forms_are_rejected() {
-    assert!(parse("query q = table \"public\" \"users\"\n").is_err());
-    assert!(parse("q = from users\n").is_err());
+fn primitives_are_declared_by_the_prelude_only() {
+    // Users cannot define double-underscore names.
+    assert!(parse("__where = predicate => relation => relation\n").is_err());
+    assert!(parse("__count : a -> agg int;\n").is_err());
+    // Users cannot reference an undeclared primitive.
+    assert!(parse("q = __bogus 1 2\n").is_err());
+    // Declared primitives remain referenceable, e.g. for custom combinators.
+    assert!(parse("q = __snake\n").is_ok());
 }
 
 #[test]
@@ -112,9 +117,9 @@ fn merge_is_right_biased() {
 #[test]
 fn first_class_prelude_function_can_be_bound_and_piped() {
     let program = parse(
-        "users : query { id: Int, displayName: String } = table \"public\" \"users\";\n\
+        "users : query { id = Int, displayName = String } = table \"public\" \"users\";\n\
              let snake = mapKey(snake);\
-             q = users & snake & select { id: .id };",
+             q = users & snake & select { id = .id };",
     )
     .expect("parse");
     let rows = type_check(&program).expect("type check");
@@ -124,7 +129,7 @@ fn first_class_prelude_function_can_be_bound_and_piped() {
 #[test]
 fn lambda_predicate_is_a_function_value() {
     let program = parse(
-        "users : query { id: Int, active: Bool } = table \"public\" \"users\";\n\
+        "users : query { id = Int, active = Bool } = table \"public\" \"users\";\n\
              q = where(row => row.active == true, users);",
     )
     .expect("parse");
@@ -136,7 +141,7 @@ fn lambda_predicate_is_a_function_value() {
 fn implicit_field_syntax_desugars_to_lambdas() {
     let program = parse(
         "is_active = (.active == true)\n\
-         projection = { id: .id }\n\
+         projection = { id = .id }\n\
          matches = (.user_id == that.owner_id)\n",
     )
     .expect("parse");
@@ -169,8 +174,8 @@ fn implicit_field_syntax_desugars_to_lambdas() {
 #[test]
 fn implicit_two_row_join_syntax_type_checks() {
     let program = parse(
-        "users : query { id: int } = table \"public\" \"users\"\n\
-         orders : query { owner_id: int } = table \"public\" \"orders\"\n\
+        "users : query { id = int } = table \"public\" \"users\"\n\
+         orders : query { owner_id = int } = table \"public\" \"orders\"\n\
          report = orders & inner users (.owner_id == that.id)\n",
     )
     .expect("parse");
@@ -181,7 +186,7 @@ fn implicit_two_row_join_syntax_type_checks() {
 
 #[test]
 fn table_is_a_curried_source_function_with_an_open_row() {
-    let program = parse("q = table(\"public\", \"users\") & select { id: .id };").expect("parse");
+    let program = parse("q = table(\"public\", \"users\") & select { id = .id };").expect("parse");
     let rows = type_check(&program).expect("type check");
     assert_eq!(rows["q"].field("id").unwrap().ty, Type::Any);
 }
@@ -190,9 +195,9 @@ fn table_is_a_curried_source_function_with_an_open_row() {
 fn supports_annotated_bindings_and_whitespace_application() {
     let program = parse(
         r#"
-            users : query { id: int, active: bool } = table "public" "users";
-            active : query { id: int } =
-              users & where (.active == true) & select { id: .id };
+            users : query { id = int, active = bool } = table "public" "users";
+            active : query { id = int } =
+              users & where (.active == true) & select { id = .id };
             "#,
     )
     .expect("parse");
@@ -204,8 +209,8 @@ fn supports_annotated_bindings_and_whitespace_application() {
 #[test]
 fn supports_annotations_inside_lambda_parameters() {
     let program = parse(
-        "users : query { active: Bool } = table \"public\" \"users\"\n\
-             q = where (row : { active: Bool } => row.active == true) (users);",
+        "users : query { active = Bool } = table \"public\" \"users\"\n\
+             q = where (row : { active = Bool } => row.active == true) (users);",
     )
     .expect("parse");
     type_check(&program).expect("type check");
@@ -214,8 +219,8 @@ fn supports_annotations_inside_lambda_parameters() {
 #[test]
 fn supports_lambda_syntax() {
     let program = parse(
-        "is_active = row : { active: bool } => row.active == true;\n\
-             users : query { active: bool } = table \"public\" \"users\";\n\
+        "is_active = row : { active = bool } => row.active == true;\n\
+             users : query { active = bool } = table \"public\" \"users\";\n\
              q = users & where is_active;",
     )
     .expect("parse");
@@ -230,7 +235,7 @@ fn fn_lambda_syntax_is_rejected() {
 #[test]
 fn definitions_are_separated_by_newlines_without_semicolons() {
     let program = parse(
-            "users : query { id: int } = table \"public\" \"users\"\nactive = users & select { id: .id }\n",
+            "users : query { id = int } = table \"public\" \"users\"\nactive = users & select { id = .id }\n",
         )
         .expect("parse");
     let rows = type_check(&program).expect("type check");
@@ -420,19 +425,19 @@ fn mapper_signatures_express_output_rows_as_type_level_operations() {
 #[test]
 fn row_operations_normalize_against_concrete_annotations() {
     let good = parse(
-            "users : query { displayName: string, age: int } = table \"public\" \"users\"\n             renamed : query { display_name: string, age: int } = users & mapKey snake\n             nullable : query { displayName: maybe string, age: maybe int } = users & mapValue maybe\n             merged : query { displayName: string, age: int } = merge users users\n",
+            "users : query { displayName = string, age = int } = table \"public\" \"users\"\n             renamed : query { display_name = string, age = int } = users & mapKey snake\n             nullable : query { displayName = maybe string, age = maybe int } = users & mapValue maybe\n             merged : query { displayName = string, age = int } = merge users users\n",
         )
         .expect("parse");
     type_check(&good).expect("type check");
 
     let bad_key = parse(
-            "users : query { displayName: string } = table \"public\" \"users\"\n             renamed : query { displayName: string } = users & mapKey snake\n",
+            "users : query { displayName = string } = table \"public\" \"users\"\n             renamed : query { displayName = string } = users & mapKey snake\n",
         )
         .expect("parse");
     assert!(type_check(&bad_key).is_err());
 
     let bad_merge = parse(
-            "users : query { displayName: string } = table \"public\" \"users\"\n             other : query { age: int } = table \"public\" \"other\"\n             merged : query { displayName: string } = merge users other\n",
+            "users : query { displayName = string } = table \"public\" \"users\"\n             other : query { age = int } = table \"public\" \"other\"\n             merged : query { displayName = string } = merge users other\n",
         )
         .expect("parse");
     assert!(type_check(&bad_merge).is_err());
@@ -462,7 +467,7 @@ fn row_operator_kinds_reject_cross_axis_mappers() {
 #[test]
 fn row_polymorphic_definitions_preserve_and_validate_rows() {
     let program = parse(
-        "users : query { id: int, active: bool } = table \"public\" \"users\"\n\
+        "users : query { id = int, active = bool } = table \"public\" \"users\"\n\
              keep : query r -> query r = relation => relation\n\
              q = keep users\n",
     )
@@ -478,8 +483,9 @@ fn row_polymorphic_definitions_preserve_and_validate_rows() {
     .expect("parse");
     assert!(type_check(&bad).is_err());
 
-    let mismatched_row_function = parse("invalid : { id: int } -> { name: string } = row => row\n")
-        .expect("parse ordinary row function");
+    let mismatched_row_function =
+        parse("invalid : { id = int } -> { name = string } = row => row\n")
+            .expect("parse ordinary row function");
     assert!(type_check(&mismatched_row_function).is_err());
 }
 
@@ -514,8 +520,8 @@ fn polymorphic_definitions_are_instantiated_per_use() {
 #[test]
 fn comparison_operators_are_function_applications_and_sql_predicates() {
     let program = parse(
-        "users : query { active: bool } = table \"public\" \"users\"\n\
-             is_active = row : { active: bool } => row.active == true\n\
+        "users : query { active = bool } = table \"public\" \"users\"\n\
+             is_active = row : { active = bool } => row.active == true\n\
              q = users & where is_active\n",
     )
     .expect("parse");
@@ -553,15 +559,47 @@ fn row_constructor_marks_row_kind_and_rejects_kind_mismatch() {
 #[test]
 fn prelude_has_scalar_temporal_and_aggregate_types() {
     let program = parse(
-            "table events { id: int, happened: timestamp, day: date, amount: float }\n\
-             events_q : query { id: int, happened: timestamp, day: date, amount: float } = table \"public\" \"events\"\n\
-             totals = events_q & agg { day: group .day, total: sum .amount, rows: count }\n",
+            "events_q : query { id = int, happened = timestamp, day = date, amount = float } = table \"public\" \"events\"\n\
+             totals = events_q & agg { day = group .day, total = sum .amount, rows = count }\n",
         )
         .expect("parse");
     let rows = type_check(&program).expect("type check");
     assert_eq!(rows["totals"].field("day").unwrap().ty, Type::Date);
     assert_eq!(rows["totals"].field("total").unwrap().ty, Type::Float);
     assert_eq!(rows["totals"].field("rows").unwrap().ty, Type::Int);
+}
+
+#[test]
+fn table_rows_come_from_the_binding_annotation() {
+    let program = parse(
+        "users : query { id = int, active = bool } = table \"public\" \"users\"\n\
+             q = users & where (.active == true)\n",
+    )
+    .expect("parse");
+    let rows = type_check(&program).expect("type check");
+    assert_eq!(rows["q"].field("active").unwrap().ty, Type::Bool);
+}
+
+#[test]
+fn table_rows_accept_an_inline_type_annotation() {
+    let program = parse(
+        "users = table \"public\" \"users\" : query { id = int, name = string }\n\
+             q = users & select { name = .name }\n",
+    )
+    .expect("parse");
+    let rows = type_check(&program).expect("type check");
+    assert_eq!(rows["q"].field("name").unwrap().ty, Type::String);
+}
+
+#[test]
+fn table_rows_stay_open_until_a_binding_refines_them() {
+    let program = parse(
+        "users = table \"public\" \"users\"\n\
+             q = users & select { id = .id }\n",
+    )
+    .expect("parse");
+    let rows = type_check(&program).expect("type check");
+    assert_eq!(rows["q"].field("id").unwrap().ty, Type::Any);
 }
 
 #[test]
@@ -573,15 +611,15 @@ fn rejects_mismatched_scalar_and_aggregate_types() {
     assert!(type_check(&bad_comparison).is_err());
 
     let bad_aggregate = parse(
-        "users : query { name: string } = table \"public\" \"users\"\n\
-             bad = users & agg { total: sum .name }\n",
+        "users : query { name = string } = table \"public\" \"users\"\n\
+             bad = users & agg { total = sum .name }\n",
     )
     .expect("parse");
     assert!(type_check(&bad_aggregate).is_err());
 
     let unknown_field = parse(
-        "users : query { id: int } = table \"public\" \"users\"\n\
-             bad = users & agg { total: sum .missing }\n",
+        "users : query { id = int } = table \"public\" \"users\"\n\
+             bad = users & agg { total = sum .missing }\n",
     )
     .expect("parse");
     assert!(type_check(&unknown_field).is_err());
@@ -590,8 +628,8 @@ fn rejects_mismatched_scalar_and_aggregate_types() {
 #[test]
 fn join_checks_key_types_and_outer_join_nullability() {
     let program = parse(
-        "users : query { id: int } = table \"public\" \"users\"\n\
-             orders : query { user_id: int, total: float } = table \"public\" \"orders\"\n\
+        "users : query { id = int } = table \"public\" \"users\"\n\
+             orders : query { user_id = int, total = float } = table \"public\" \"orders\"\n\
              report = users & left orders (l => r => l.id == r.user_id)\n",
     )
     .expect("parse");
@@ -603,8 +641,8 @@ fn join_checks_key_types_and_outer_join_nullability() {
     );
 
     let bad = parse(
-        "users : query { id: int } = table \"public\" \"users\"\n\
-             orders : query { user_id: string } = table \"public\" \"orders\"\n\
+        "users : query { id = int } = table \"public\" \"users\"\n\
+             orders : query { user_id = string } = table \"public\" \"orders\"\n\
              report = users & inner orders (l => r => l.id == r.user_id)\n",
     )
     .expect("parse");
@@ -614,9 +652,9 @@ fn join_checks_key_types_and_outer_join_nullability() {
 #[test]
 fn prelude_override_controls_relation_semantics() {
     let program = parse(
-        "users : query { id: int, active: bool } = table \"public\" \"users\"\n\
+        "users : query { id = int, active = bool } = table \"public\" \"users\"\n\
              select = projection => relation => __where (.active == true) relation\n\
-             q = users & select { id: .id }\n",
+             q = users & select { id = .id }\n",
     )
     .expect("parse");
     let rows = type_check(&program).expect("type check");
@@ -629,9 +667,9 @@ fn prelude_override_controls_relation_semantics() {
 #[test]
 fn user_alias_can_take_an_aggregate_projection() {
     let program = parse(
-        "users : query { id: int } = table \"public\" \"users\"\n\
+        "users : query { id = int } = table \"public\" \"users\"\n\
              summarize = agg\n\
-             q = users & summarize { rows: count }\n",
+             q = users & summarize { rows = count }\n",
     )
     .expect("parse");
     let rows = type_check(&program).expect("type check");
@@ -644,10 +682,10 @@ fn user_alias_can_take_an_aggregate_projection() {
 #[test]
 fn aggregate_constructor_uses_prelude_binding() {
     let program = parse(
-        "users : query { id: int } = table \"public\" \"users\"\n\
+        "users : query { id = int } = table \"public\" \"users\"\n\
              sum = field => __count field\n\
              countRows = count\n\
-             q = users & agg { rows: sum .id, all_rows: countRows }\n",
+             q = users & agg { rows = sum .id, all_rows = countRows }\n",
     )
     .expect("parse");
     let rows = type_check(&program).expect("type check");
@@ -663,7 +701,7 @@ fn aggregate_constructor_uses_prelude_binding() {
 fn comparison_operator_uses_prelude_binding_in_predicates() {
     let program = parse(
         "_==_ = left => right => __ne left right\n\
-             users : query { active: bool } = table \"public\" \"users\"\n\
+             users : query { active = bool } = table \"public\" \"users\"\n\
              q = users & where (.active == true)\n\
              r = users & where (row => row.active == true)\n",
     )
@@ -679,7 +717,7 @@ fn comparison_operator_uses_prelude_binding_in_predicates() {
 #[test]
 fn mapper_constructors_are_prelude_functions() {
     let program = parse(
-        "users : query { id: int } = table \"public\" \"users\"\n\
+        "users : query { id = int } = table \"public\" \"users\"\n\
              q = users & mapKey (prefix \"user_\")\n\
              r = users & mapKey(suffix(\"_column\"))\n",
     )
@@ -697,11 +735,93 @@ fn mapper_constructors_are_prelude_functions() {
 }
 
 #[test]
-fn temporal_constructor_uses_its_prelude_definition() {
+fn temporal_literals_are_syntax() {
     let program = parse(
-        "date = value => value\n\
-             result : string = date \"2026-01-01\"\n",
+        "day : date = date \"2026-01-01\"\n\
+             moment : timestamp = timestamp \"2026-01-01T00:00:00Z\"\n",
     )
     .expect("parse");
     type_check(&program).expect("type check");
+}
+
+#[test]
+fn order_and_limit_type_check_against_the_relation_row() {
+    let program = parse(
+        r#"
+            users : query { id = Int, lastName = String, age = Int } = table "public" "users"
+            by_age = users & order [asc .age] & limit 10
+            by_name = users & order [asc .lastName, desc .age]
+            explicit = users & order [asc .lastName, desc .age]
+            "#,
+    )
+    .expect("parse");
+    let rows = type_check(&program).expect("type check");
+    assert_eq!(rows["by_age"].field("age").unwrap().ty, Type::Int);
+    assert_eq!(rows["by_name"].field("lastName").unwrap().ty, Type::String);
+    assert_eq!(rows["explicit"].field("id").unwrap().ty, Type::Int);
+}
+
+#[test]
+fn spaced_dot_starts_a_new_argument_not_field_access() {
+    let program = parse(
+        "users : query { id = Int, name = String } = table \"public\" \"users\"\n\
+             q = users & order [desc .name]\n\
+             r = users & order (row => [asc(row.name)])\n",
+    )
+    .expect("parse");
+    let rows = type_check(&program).expect("type check");
+    assert_eq!(rows["q"].field("name").unwrap().ty, Type::String);
+    assert_eq!(rows["r"].field("name").unwrap().ty, Type::String);
+}
+
+#[test]
+fn order_preserves_the_row_of_its_relation() {
+    let program = parse(
+        "users : query { id = Int, name = Maybe String } = table \"public\" \"users\"\n\
+             q = users & order [desc .name]\n",
+    )
+    .expect("parse");
+    let rows = type_check(&program).expect("type check");
+    assert_eq!(
+        rows["q"].field("name").unwrap().ty,
+        Type::Maybe(Box::new(Type::String))
+    );
+}
+
+#[test]
+fn order_rejects_raw_values_as_keys() {
+    let program =
+        parse("users : query { id = Int } = table \"public\" \"users\"\nq = users & order [1]\n")
+            .expect("parse");
+    let error = type_check(&program).expect_err("order keys must be directions");
+    assert!(error.to_string().contains("order"), "got: {error}");
+}
+
+#[test]
+fn limit_rejects_a_non_literal_count() {
+    let program = parse(
+        "users : query { id = Int } = table \"public\" \"users\"\nq = users & limit (row => row.id)\n",
+    )
+    .expect("parse");
+    let error = type_check(&program).expect_err("limit needs a count");
+    assert!(error.to_string().contains("limit"), "got: {error}");
+}
+
+#[test]
+fn row_literals_construct_row_values() {
+    let program =
+        parse("point : row { x = int, label = string } = { x = 1, label = \"origin\" }\n")
+            .expect("parse");
+    type_check(&program).expect("type check");
+}
+
+#[test]
+fn row_literal_fields_must_exist_on_the_row() {
+    let program = parse(
+        "users : query { id = int } = table \"public\" \"users\"\n\
+             q = users & select { name = .name }\n",
+    )
+    .expect("parse");
+    let error = type_check(&program).expect_err("unknown field");
+    assert!(error.to_string().contains("name"), "got: {error}");
 }
