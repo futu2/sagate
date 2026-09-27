@@ -154,9 +154,8 @@ impl Parser {
         } else {
             None
         };
-        // A bare declaration `name : type;` gives a backend primitive its
-        // type without a sagate body. The SQL compiler implements the name;
-        // the self-reference marker only carries the annotation.
+        // A bare declaration `name : type;` gives a structural backend
+        // primitive its type. SQL scalar functions use `sql "..."` bodies.
         if annotation.is_some() && self.eat_symbol(";") {
             return Ok(Binding {
                 name: name.clone(),
@@ -654,6 +653,10 @@ impl Parser {
             TokenKind::Ident(value) if value == "true" => Ok(Expr::Literal(Literal::Bool(true))),
             TokenKind::Ident(value) if value == "false" => Ok(Expr::Literal(Literal::Bool(false))),
             TokenKind::Ident(value) if value == "null" => Ok(Expr::Literal(Literal::Null)),
+            TokenKind::Ident(value) if value == "sql" => match self.bump().kind {
+                TokenKind::String(template) => Ok(Expr::SqlTemplate(template)),
+                _ => self.error("expected a SQL template string after 'sql'"),
+            },
             // Temporal literals are syntax: `date "..."` and `timestamp "..."`
             // construct typed literals directly.
             TokenKind::Ident(value) if matches!(value.as_str(), "date" | "timestamp") => {

@@ -32,6 +32,47 @@ fn compiles_null_comparisons_with_is() {
 }
 
 #[test]
+fn compiles_sql_functions_defined_in_the_prelude() {
+    let program = parse(
+        "users : query { name = string } = table \"public\" \"users\"\n\
+             q = users & select (row => { normalized = lower(row.name), name_length = length(row.name) })\n",
+    )
+    .expect("parse");
+    let queries = compile(&program).expect("compile");
+    let q = queries.iter().find(|query| query.name == "q").unwrap();
+    assert!(q.sql.contains("LOWER(q.\"name\") AS \"normalized\""));
+    assert!(q.sql.contains("LENGTH(q.\"name\") AS \"name_length\""));
+}
+
+#[test]
+fn compiles_multi_argument_sql_templates() {
+    let program = parse(
+        "between : int -> int -> int -> bool = sql \"$1 BETWEEN $2 AND $3\"\n\
+             users : query { age = int } = table \"public\" \"users\"\n\
+             q = users & select (row => { adult = between (row.age) 18 65 })\n",
+    )
+    .expect("parse");
+    let queries = compile(&program).expect("compile");
+    let q = queries.iter().find(|query| query.name == "q").unwrap();
+    assert!(q.sql.contains("q.\"age\" BETWEEN 18 AND 65"), "{}", q.sql);
+}
+
+#[test]
+fn rejects_sql_templates_with_missing_arguments() {
+    let program = parse(
+        "label : string -> string = sql \"UPPER($2)\"\n\
+             users : query { name = string } = table \"public\" \"users\"\n\
+             q = users & select (row => { label = label(row.name) })\n",
+    )
+    .expect("parse");
+    let error = compile(&program).expect_err("template arity mismatch");
+    assert!(
+        error.contains("SQL template expects 2 positional arguments"),
+        "{error}"
+    );
+}
+
+#[test]
 fn predicates_lift_general_expressions_to_sql() {
     let program = parse(
         "orders : query { price = float, qty = int, discount = float, created_at = timestamp } = table \"public\" \"orders\"\n\

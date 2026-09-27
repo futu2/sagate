@@ -34,13 +34,14 @@ fn aggregate_projection(
     };
     let mut extracted = Vec::with_capacity(fields.len());
     for (alias, value) in fields {
-        let (operation, field) = aggregate_key(value, definitions)?;
+        let (operation, function, field) = aggregate_key(value, definitions)?;
         if field.is_none() && !matches!(operation, AggregateOp::Count) {
             return Err(format!("aggregate '{alias}' expects a field reference"));
         }
         extracted.push(AggregateField {
             alias: alias.clone(),
             operation,
+            function,
             field,
         });
     }
@@ -53,7 +54,7 @@ fn aggregate_projection(
 fn aggregate_key(
     value: &Expr,
     definitions: &HashMap<String, &Expr>,
-) -> Result<(AggregateOp, Option<String>), String> {
+) -> Result<(AggregateOp, Option<String>, Option<String>), String> {
     let (head, arguments) = flatten_apply(value);
     let head = match head {
         Expr::Annotated { expr, .. } => expr.as_ref(),
@@ -87,7 +88,8 @@ fn aggregate_key(
                 arguments
                     .first()
                     .and_then(|argument| field_name_of(argument));
-            Ok((operation, field))
+            let function = (!matches!(operation, AggregateOp::Group)).then(|| name.clone());
+            Ok((operation, function, field))
         }
         // An aliased constructor reduces through its wrapper lambda: applied
         // arguments beta-reduce, a bare reference (`countRows = count`)

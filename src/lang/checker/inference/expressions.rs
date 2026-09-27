@@ -24,6 +24,7 @@ fn infer_expr_with_state(
             .or_else(|| name.starts_with("__").then_some(Type::Any))
             .ok_or_else(|| TypeError::new(format!("unknown variable '{name}'"))),
         Expr::Literal(literal) => Ok(literal_type(literal)),
+        Expr::SqlTemplate(_) => Ok(Type::Any),
         Expr::Annotated { expr, ty } => {
             let ty = freshen_type(ty, state);
             let inferred = infer_expr_with_state(expr, environment, state)?;
@@ -334,7 +335,7 @@ fn infer_application(
                 if matches!(arguments[1], Expr::Lambda { .. }) {
                     check_join_row_expression(arguments[1], &left, &right)?;
                 }
-                return Ok(Type::Relation(join_result_row(&left, &right, name)));
+                return Ok(Type::Relation(Row::joined(&left, &right, name)));
             }
             "__merge" => {
                 if arguments.len() != 2 {

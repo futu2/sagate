@@ -35,27 +35,6 @@ fn aggregate_row(input: &Row, fields: &[AggregateField]) -> Result<Row, TypeErro
     Ok(Row::new(output))
 }
 
-fn join_result_row(left: &Row, right: &Row, kind: &str) -> Row {
-    let mut row = right.merge(left);
-    let nullable_left = matches!(kind, "__joinRight" | "__joinFull");
-    let nullable_right = matches!(kind, "__joinLeft" | "__joinFull");
-    for column in &mut row.columns {
-        let from_left = left.field(&column.name).is_some();
-        if (from_left && nullable_left) || (!from_left && nullable_right) {
-            column.ty = make_nullable(column.ty.clone());
-        }
-    }
-    row
-}
-
-fn make_nullable(ty: Type) -> Type {
-    if matches!(ty, Type::Maybe(_)) {
-        ty
-    } else {
-        Type::Maybe(Box::new(ty))
-    }
-}
-
 fn check_join_row_expression(expr: &Expr, left: &Row, right: &Row) -> Result<(), TypeError> {
     let Expr::Lambda {
         param: left_param,
@@ -135,7 +114,7 @@ fn aggregate_fields(expr: &Expr) -> Option<Result<Vec<AggregateField>, TypeError
     let mut extracted = Vec::with_capacity(fields.len());
     for (alias, value) in fields {
         let extracted_field = match aggregate_key(value) {
-            Ok((operation, field)) => {
+            Ok((operation, function, field)) => {
                 if field.is_none() && !matches!(operation, AggregateOp::Count) {
                     return Some(Err(TypeError::new(format!(
                         "aggregate '{alias}' expects a field reference"
@@ -144,6 +123,7 @@ fn aggregate_fields(expr: &Expr) -> Option<Result<Vec<AggregateField>, TypeError
                 AggregateField {
                     alias: alias.clone(),
                     operation,
+                    function,
                     field,
                 }
             }
@@ -157,7 +137,9 @@ fn aggregate_fields(expr: &Expr) -> Option<Result<Vec<AggregateField>, TypeError
 /// Match an aggregate constructor application. The user spellings are matched
 /// directly: row literals are opaque to alias expansion, so the prelude
 /// names survive to this point.
-fn aggregate_key(value: &Expr) -> Result<(AggregateOp, Option<String>), TypeError> {
+fn aggregate_key(
+    value: &Expr,
+) -> Result<(AggregateOp, Option<String>, Option<String>), TypeError> {
     let (head, arguments) = flatten_apply(value);
     let head = match head {
         Expr::Annotated { expr, .. } => expr.as_ref(),
@@ -179,7 +161,8 @@ fn aggregate_key(value: &Expr) -> Result<(AggregateOp, Option<String>), TypeErro
                 }
             };
             let field = arguments.first().and_then(|argument| field_name_of(argument));
-            Ok((operation, field))
+            let function = (!matches!(operation, AggregateOp::Group)).then(|| name.clone());
+            Ok((operation, function, field))
         }
         // An aliased constructor expands to its wrapper lambda: reduce the
         // application, or step into the body for a bare reference such as
@@ -295,6 +278,16 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     "expression cannot be used in a SQL predicate",
                 ));
             };
+            // SQL-template functions keep their declared function type during
+            // ordinary inference. Here the row-aware pass only needs to
+            // validate their row arguments; the SQL lowerer instantiates the
+            // template after validating their types.
+            if !name.starts_with("__") {
+                for argument in arguments {
+                    row_expression_type(argument, scope)?;
+                }
+                return Ok(Type::Any);
+            }
             let direction_key = matches!(name.as_str(), "__asc" | "__desc");
             if arguments.len() != 2 && !(direction_key && arguments.len() == 1) {
                 return Err(TypeError::new(format!(
@@ -396,4 +389,3 @@ fn is_orderable_type(ty: &Type) -> bool {
         _ => false,
     }
 }
-

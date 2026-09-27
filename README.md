@@ -214,11 +214,22 @@ Because each step keeps its position in the chain, `order` sorts at the step
 where it appears: place it last, or directly before `limit`, since an outer
 projection is free to reorder rows.
 
-Public functions and operators are defined in `prelude.sagate`. The
-double-underscore primitives are declared there with their signatures, and
-those declarations are the type-level source of truth; the Rust compiler
-implements the primitives for SQL generation and gives the relational ones
-their row typing. User bindings can override prelude definitions; the
+Public functions and operators are defined in `prelude.sagate`. Scalar SQL
+functions use `sql` expression templates with positional placeholders; the
+compiler parses each template as a SQL expression and substitutes typed
+arguments before rendering the requested dialect:
+
+```sagate
+lower : string -> string = sql "LOWER($1)"
+between : int -> int -> int -> bool = sql "$1 BETWEEN $2 AND $3"
+```
+
+The prelude defines arithmetic, comparison, boolean, and common string
+functions this way, along with the SQL calls for `count`, `sum`, `avg`, `min`,
+and `max`. For example, `lower(row.name)` can be used inside a projection.
+The Rust compiler retains the structural relational primitives (`table`,
+`where`, joins, and query transformations), which build the query AST and
+provide row typing. User bindings can override prelude definitions; the
 previous definition remains available within the overriding binding.
 Aggregate constructors can also be aliased or overridden through bindings.
 Predicates in `where` and joins accept full scalar expressions — fields,

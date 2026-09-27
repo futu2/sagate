@@ -13,6 +13,14 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> 
     let mut definitions = HashMap::<String, Definition>::new();
     let mut query_rows = HashMap::new();
     for binding in &program.bindings {
+        if is_sql_template_definition(&binding.expr)
+            && !has_sql_template_function_signature(&binding.expr, binding.annotation.as_ref())
+        {
+            return Err(TypeError::new(format!(
+                "definition '{}' SQL template requires a function type signature",
+                binding.name
+            )));
+        }
         if let Some(annotation) = &binding.annotation {
             validate_type_kinds(annotation).map_err(|error| {
                 TypeError::new(format!(
@@ -413,6 +421,7 @@ fn expand_aliases(
                     // Primitives are declared, not defined; their applications
                     // are typed by dedicated rules, so never inline them.
                     && !name.starts_with("__")
+                    && !is_sql_template_definition(&definitions[name].expr)
                     && !matches!(environment.get(name), Some(Type::Relation(_)))
                     && !stack.contains(name) =>
             {
@@ -521,6 +530,35 @@ fn annotate_lambda_parameters(expr: Expr, ty: &Type) -> Expr {
             body: Box::new(annotate_lambda_parameters(*body, result)),
         },
         (expr, _) => expr,
+    }
+}
+
+fn is_sql_template_definition(expr: &Expr) -> bool {
+    match expr {
+        Expr::SqlTemplate(_) => true,
+        Expr::Overloaded(cases) => {
+            !cases.is_empty() && cases.iter().all(|case| is_sql_template_definition(&case.expr))
+        }
+        Expr::Annotated { expr, .. } => is_sql_template_definition(expr),
+        _ => false,
+    }
+}
+
+fn is_function_type(ty: &Type) -> bool {
+    match ty {
+        Type::Function(_, _) => true,
+        Type::Overloaded(types) => !types.is_empty() && types.iter().all(is_function_type),
+        _ => false,
+    }
+}
+
+fn has_sql_template_function_signature(expr: &Expr, annotation: Option<&Type>) -> bool {
+    match expr {
+        Expr::Overloaded(cases) if !cases.is_empty() => cases.iter().all(|case| {
+            is_sql_template_definition(&case.expr)
+                && case.annotation.as_ref().is_some_and(is_function_type)
+        }),
+        _ => annotation.is_some_and(is_function_type),
     }
 }
 

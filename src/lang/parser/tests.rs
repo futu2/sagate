@@ -2,6 +2,29 @@ use super::*;
 use crate::lang::type_check;
 
 #[test]
+fn prelude_defines_functional_helpers_in_sagate() {
+    let program = parse(
+        "constant_value : int = constant 7 \"ignored\"\n\
+             increment : int -> int = value => value + 1\n\
+             composed_value : int = compose increment increment constant_value\n\
+             pair : int -> string -> int = first => second => first\n\
+             flipped : string -> int -> int = flip pair\n\
+             flipped_value : int = flipped \"ignored\" 9\n",
+    )
+    .expect("parse");
+    type_check(&program).expect("type check");
+}
+
+#[test]
+fn sql_templates_require_a_function_signature() {
+    let program = parse("lower = sql \"LOWER($1)\"\n").expect("parse");
+    let error = type_check(&program).expect_err("template needs a signature");
+    assert!(error
+        .to_string()
+        .contains("SQL template requires a function type signature"));
+}
+
+#[test]
 fn parses_forward_application_as_an_ordinary_infix_application() {
     let program = parse(
         r#"

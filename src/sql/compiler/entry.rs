@@ -114,6 +114,7 @@ fn compile_expr(
         | Expr::Mapper { .. }
         | Expr::Overloaded(_)
         | Expr::Literal(_)
+        | Expr::SqlTemplate(_)
         | Expr::Field(_)
         | Expr::Access { .. }
         | Expr::Lambda { .. } => Err("expression does not produce a relation".to_owned()),
@@ -226,7 +227,8 @@ fn compile_application(
             let inner =
                 compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
             let fields = aggregate_projection(arguments[0], definitions)?;
-            compile_aggregate(inner, &fields, counter).map_err(|error| error.to_string())
+            compile_aggregate(inner, &fields, definitions, counter)
+                .map_err(|error| error.to_string())
         }
         "__joinInner" | "__joinLeft" | "__joinRight" | "__joinFull" => {
             if arguments.len() != 3 {
@@ -297,4 +299,3 @@ fn compile_application(
         }
     }
 }
-

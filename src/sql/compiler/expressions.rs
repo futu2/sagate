@@ -209,6 +209,11 @@ fn lower_row_expression(
             let Expr::Var(name) = head else {
                 return Err("expression cannot be lowered to SQL".to_owned());
             };
+            if let Some(definition) = definitions.get(name) {
+                if let Some(template) = sql_template(definition) {
+                    return instantiate_sql_template(template, &arguments, scope, definitions);
+                }
+            }
             // Chase named bindings to the primitive they bottom out at.
             if !name.starts_with("__") {
                 let Some(definition) = definitions.get(name) else {
@@ -223,47 +228,104 @@ fn lower_row_expression(
                 }
                 return lower_row_expression(&expanded, scope, definitions);
             }
-            match (name.as_str(), arguments.len()) {
-                ("__eq" | "__ne" | "__lt" | "__le" | "__gt" | "__ge", 2) => {
-                    let operator = comparison_operator(name).unwrap();
-                    let left = lower_row_expression(arguments[0], scope, definitions)?;
-                    let right = lower_row_expression(arguments[1], scope, definitions)?;
-                    comparison_sql(operator, left, right)
-                }
-                ("__and" | "__or", 2) => {
-                    let operator = if name == "__and" {
-                        BinaryOperator::And
-                    } else {
-                        BinaryOperator::Or
-                    };
-                    let left = lower_row_expression(arguments[0], scope, definitions)?;
-                    let right = lower_row_expression(arguments[1], scope, definitions)?;
-                    Ok(SqlExpr::BinaryOp {
-                        left: Box::new(left),
-                        op: operator,
-                        right: Box::new(right),
-                    })
-                }
-                ("__add" | "__sub" | "__mul" | "__div" | "__mod", 2) => {
-                    let operator = match name.as_str() {
-                        "__add" => BinaryOperator::Plus,
-                        "__sub" => BinaryOperator::Minus,
-                        "__mul" => BinaryOperator::Multiply,
-                        "__div" => BinaryOperator::Divide,
-                        _ => BinaryOperator::Modulo,
-                    };
-                    let left = lower_row_expression(arguments[0], scope, definitions)?;
-                    let right = lower_row_expression(arguments[1], scope, definitions)?;
-                    Ok(SqlExpr::BinaryOp {
-                        left: Box::new(left),
-                        op: operator,
-                        right: Box::new(right),
-                    })
-                }
-                _ => Err(format!("primitive '{name}' cannot be lowered to SQL")),
-            }
+            Err(format!("primitive '{name}' cannot be lowered to SQL"))
         }
         _ => Err("expression cannot be lowered to SQL".to_owned()),
+    }
+}
+
+fn sql_template(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::SqlTemplate(template) => Some(template),
+        Expr::Annotated { expr, .. } => sql_template(expr),
+        Expr::Overloaded(cases) if !cases.is_empty() => {
+            let template = sql_template(&cases[0].expr)?;
+            cases
+                .iter()
+                .all(|case| sql_template(&case.expr) == Some(template))
+                .then_some(template)
+        }
+        _ => None,
+    }
+}
+
+fn instantiate_sql_template(
+    template: &str,
+    arguments: &[&Expr],
+    scope: &RowScope<'_>,
+    definitions: &HashMap<String, &Expr>,
+) -> Result<SqlExpr, String> {
+    let sql_arguments = arguments
+        .iter()
+        .map(|argument| lower_row_expression(argument, scope, definitions))
+        .collect::<Result<Vec<_>, _>>()?;
+    instantiate_sql_template_ast(template, &sql_arguments)
+}
+
+fn instantiate_sql_template_ast(
+    template: &str,
+    sql_arguments: &[SqlExpr],
+) -> Result<SqlExpr, String> {
+    let template = sqlglot_rust::builder::parse_expr(template)
+        .ok_or_else(|| format!("invalid SQL expression template '{template}'"))?;
+    let mut positions = Vec::new();
+    let mut invalid_parameter = None;
+    template.walk(&mut |expr| {
+        if let SqlExpr::Parameter(parameter) = expr {
+            match parameter
+                .strip_prefix('$')
+                .and_then(|index| index.parse::<usize>().ok())
+                .filter(|index| *index > 0)
+            {
+                Some(index) => positions.push(index),
+                None => invalid_parameter = Some(parameter.clone()),
+            }
+        }
+        true
+    });
+    if let Some(parameter) = invalid_parameter {
+        return Err(format!(
+            "SQL templates only support positional placeholders like '$1', got '{parameter}'"
+        ));
+    }
+    let arity = positions.iter().copied().max().unwrap_or(0);
+    if sql_arguments.len() != arity || (1..=arity).any(|index| !positions.contains(&index)) {
+        return Err(format!(
+            "SQL template expects {arity} positional arguments, got {}",
+            sql_arguments.len()
+        ));
+    }
+    let expression = template.transform(&|node| match node {
+        SqlExpr::Parameter(parameter) => parameter
+            .strip_prefix('$')
+            .and_then(|index| index.parse::<usize>().ok())
+            .and_then(|index| sql_arguments.get(index - 1))
+            .cloned()
+            .unwrap_or(SqlExpr::Parameter(parameter)),
+        other => other,
+    });
+    normalize_template_null_comparison(expression, &sql_arguments)
+}
+
+fn normalize_template_null_comparison(
+    expression: SqlExpr,
+    arguments: &[SqlExpr],
+) -> Result<SqlExpr, String> {
+    if !arguments.iter().any(|argument| matches!(argument, SqlExpr::Null)) {
+        return Ok(expression);
+    }
+    match expression {
+        SqlExpr::BinaryOp { left, op, right }
+            if matches!(
+                op,
+                BinaryOperator::Eq
+                    | BinaryOperator::Neq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq
+            ) => comparison_sql(op, *left, *right),
+        other => Ok(other),
     }
 }
 
@@ -293,19 +355,6 @@ fn comparison_sql(
         right: Box::new(right),
     })
 }
-
-fn comparison_operator(name: &str) -> Option<BinaryOperator> {
-    match name {
-        "__eq" => Some(BinaryOperator::Eq),
-        "__ne" => Some(BinaryOperator::Neq),
-        "__lt" => Some(BinaryOperator::Lt),
-        "__le" => Some(BinaryOperator::LtEq),
-        "__gt" => Some(BinaryOperator::Gt),
-        "__ge" => Some(BinaryOperator::GtEq),
-        _ => None,
-    }
-}
-
 
 fn sql_literal(literal: &Literal) -> SqlExpr {
     match literal {

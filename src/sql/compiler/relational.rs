@@ -193,6 +193,7 @@ fn projection_field_type(value: &Expr, row: &Row) -> crate::lang::Type {
 fn compile_aggregate(
     inner: Relation,
     fields: &[AggregateField],
+    definitions: &HashMap<String, &Expr>,
     counter: &mut u32,
 ) -> Result<Relation, CompileError> {
     if fields.is_empty() {
@@ -218,23 +219,31 @@ fn compile_aggregate(
                 groups.push(source.clone());
                 source
             }
-            AggregateOp::Count => aggregate_call("COUNT", source.unwrap_or(SqlExpr::Wildcard)),
-            AggregateOp::Sum => aggregate_call(
-                "SUM",
-                source.ok_or_else(|| CompileError::new("sum expects a field reference"))?,
-            ),
-            AggregateOp::Avg => aggregate_call(
-                "AVG",
-                source.ok_or_else(|| CompileError::new("avg expects a field reference"))?,
-            ),
-            AggregateOp::Min => aggregate_call(
-                "MIN",
-                source.ok_or_else(|| CompileError::new("min expects a field reference"))?,
-            ),
-            AggregateOp::Max => aggregate_call(
-                "MAX",
-                source.ok_or_else(|| CompileError::new("max expects a field reference"))?,
-            ),
+            AggregateOp::Count
+            | AggregateOp::Sum
+            | AggregateOp::Avg
+            | AggregateOp::Min
+            | AggregateOp::Max => {
+                let template = field
+                    .function
+                    .as_ref()
+                    .and_then(|name| definitions.get(name))
+                    .and_then(|definition| sql_template(definition))
+                    .ok_or_else(|| {
+                        CompileError::new("aggregate function has no SQL template")
+                    })?;
+                let argument = match source {
+                    Some(source) => source,
+                    None if matches!(field.operation, AggregateOp::Count) => SqlExpr::Wildcard,
+                    None => {
+                        return Err(CompileError::new(format!(
+                            "{} expects a field reference",
+                            field.function.as_deref().unwrap_or("aggregate")
+                        )))
+                    }
+                };
+                instantiate_sql_template_ast(template, &[argument]).map_err(CompileError::new)?
+            }
         };
         selections.push(select_expr(expression, Some(field.alias.clone())));
         let ty = match &field.operation {
@@ -276,7 +285,7 @@ fn compile_join(
     kind: &str,
     counter: &mut u32,
 ) -> Result<Relation, CompileError> {
-    let row = joined_row(&left.row, &right.row, kind);
+    let row = Row::joined(&left.row, &right.row, kind);
     let selections = if row.columns.is_empty() {
         vec![
             SelectItem::QualifiedWildcard {
@@ -346,27 +355,6 @@ fn compile_join(
         )),
         row,
     })
-}
-
-fn joined_row(left: &Row, right: &Row, kind: &str) -> Row {
-    let mut row = right.merge(left);
-    let nullable_left = matches!(kind, "__joinRight" | "__joinFull");
-    let nullable_right = matches!(kind, "__joinLeft" | "__joinFull");
-    for column in &mut row.columns {
-        let from_left = left.field(&column.name).is_some();
-        if (from_left && nullable_left) || (!from_left && nullable_right) {
-            column.ty = nullable(column.ty.clone());
-        }
-    }
-    row
-}
-
-fn nullable(ty: crate::lang::Type) -> crate::lang::Type {
-    if matches!(ty, crate::lang::Type::Maybe(_)) {
-        ty
-    } else {
-        crate::lang::Type::Maybe(Box::new(ty))
-    }
 }
 
 fn compile_map_key(
@@ -611,17 +599,5 @@ fn select_expr(expr: SqlExpr, alias: Option<String>) -> SelectItem {
         expr,
         alias,
         alias_quote_style: QuoteStyle::DoubleQuote,
-    }
-}
-
-fn aggregate_call(name: &str, argument: SqlExpr) -> SqlExpr {
-    SqlExpr::Function {
-        name: name.to_owned(),
-        args: vec![argument],
-        distinct: false,
-        filter: None,
-        over: None,
-        order_by: vec![],
-        within_group: false,
     }
 }
