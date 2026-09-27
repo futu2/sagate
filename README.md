@@ -244,7 +244,74 @@ combined = merge users user_names
 ```
 
 Complete examples are in [`examples/users.sagate`](examples/users.sagate)
-and [`examples/report.sagate`](examples/report.sagate).
+and [`examples/report.sagate`](examples/report.sagate); a multi-file project
+is in [`examples/modules`](examples/modules).
+
+## Modules
+
+Each `.sagate` file is a module. Bindings are private unless you export them,
+and another file imports selected names through a relative path:
+
+```sagate
+# models/users.sagate
+users : query { id = int, name = string, active = bool } =
+  table "public" "users"
+
+export active_users = users & where (.active == true)
+
+export normalize : string -> string = sql "LOWER($1)"
+```
+
+```sagate
+# report.sagate
+import { active_users, normalize as normalize_name } from "./models/users.sagate"
+
+report = active_users
+  & select (row => { id = row.id, name = normalize_name(row.name) })
+```
+
+`import` and `export` are contextual keywords: they open a declaration only in
+their full syntactic form, so a binding such as `export = 1` still parses as an
+ordinary definition. Imports must appear before the first binding, use string
+literal paths that start with `./` or `../`, and name an exact `.sagate` file.
+Paths resolve against the importing file's directory, so the shell's working
+directory never affects resolution; `..` segments and symbolic links are
+canonicalized so a shared dependency loads once.
+
+Two export forms are available. `export name : type = ...` defines and exports
+a binding; `export { name, other as public_name }` publishes existing
+definitions, in any order relative to them:
+
+```sagate
+normalize : string -> string = sql "LOWER($1)"
+page_size : int = 20
+export { normalize, page_size as default_page_size }
+```
+
+An exported name can be re-exported through another module's export list, and
+overloaded names and operators export as a whole:
+
+```sagate
+# models/users.sagate publishes a re-export.
+import { active_users } from "./models/users.sagate"
+export { active_users as users }
+
+# Operators keep their section spelling.
+import { _+_ as add } from "./arithmetic.sagate"
+```
+
+Every file has its own top-level scope: two modules may both define `users` or
+override `+` without affecting each other, and an imported function keeps
+resolving to its own module's helpers regardless of the importer's definitions.
+Names must be defined before use; a forward reference to a later local binding
+is an error. Import cycles fail with the full cycle in the message.
+
+Compilation reads source files only — importing a query never runs it or
+touches the database. SQL output follows the entry file: locally defined
+queries compile in definition order under their written names, while queries in
+dependencies are available for those pipelines but never emitted on their own.
+Compiling `models/users.sagate` directly therefore emits both `users` and
+`active_users`.
 
 ## Development workflow
 
@@ -268,20 +335,29 @@ nix run . -- examples/users.sagate
 ```
 
 The CLI reads a path argument, or stdin when no path is supplied or when passed
-`-`.
+`-`. A path is compiled through the module loader, so its relative imports are
+resolved from the file's directory; stdin compiles one anonymous module and
+rejects imports.
 
 ## Rust API
 
-The crate exposes source-oriented compilation functions. The parser, checker,
-and SQL lowering modules remain internal implementation details:
+The crate exposes source- and file-oriented compilation functions. The parser,
+checker, and SQL lowering modules remain internal implementation details:
 
 ```rust
+// One anonymous module. Imports are rejected: there is no path to resolve
+// them against.
 let queries = sagate::compile_source_with_dialect(source, "postgres")?;
+
+// A file plus its relative imports. Only the entry file's local queries
+// become standalone SQL.
+let queries = sagate::compile_file_with_dialect("report.sagate", "postgres")?;
+
 for query in queries {
     println!("{}: {}", query.name, query.sql);
 }
 ```
 
-`compile_source` uses the ANSI dialect. The command-line binary is in
-`src/main.rs`; `flake.nix` provides the reproducible development shell and
-package.
+`compile_source` and `compile_file` use the ANSI dialect. The command-line
+binary is in `src/main.rs`; `flake.nix` provides the reproducible development
+shell and package.

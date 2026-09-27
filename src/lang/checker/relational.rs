@@ -286,12 +286,12 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     "expression cannot be used in a SQL predicate",
                 ));
             };
-            // SQL-template functions keep their declared function type during
-            // ordinary inference. Here the row-aware pass only needs to
-            // validate their row arguments; the SQL lowerer instantiates the
-            // template after validating their types.
-            let intrinsic = Intrinsic::from_name(name).or_else(|| Intrinsic::from_operator(name));
-            if intrinsic.is_none() && !name.starts_with("__") {
+            // Linked references to prelude bindings carry internal symbols;
+            // recognition runs on the written spelling the symbol came from.
+            let written = prelude_source_name(name);
+            let intrinsic =
+                Intrinsic::from_name(written).or_else(|| Intrinsic::from_operator(written));
+            if intrinsic.is_none() && !written.starts_with("__") {
                 for argument in arguments {
                     row_expression_type(argument, scope)?;
                 }
@@ -300,7 +300,7 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
             let direction_key = matches!(intrinsic, Some(Intrinsic::Asc | Intrinsic::Desc));
             if arguments.len() != 2 && !(direction_key && arguments.len() == 1) {
                 return Err(TypeError::new(format!(
-                    "primitive '{name}' cannot be used in a SQL predicate"
+                    "primitive '{written}' cannot be used in a SQL predicate"
                 )));
             }
             match intrinsic {
@@ -330,7 +330,7 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     ] {
                         if !matches!(ty, Type::Bool | Type::Any | Type::Variable(_)) {
                             return Err(TypeError::new(format!(
-                                "'{name}' expects boolean operands, got {ty}"
+                                "'{written}' expects boolean operands, got {ty}"
                             )));
                         }
                     }
@@ -343,14 +343,14 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     ] {
                         if !matches!(ty, Type::Int | Type::Float | Type::Any | Type::Variable(_)) {
                             return Err(TypeError::new(format!(
-                                "'{name}' expects numeric operands, got {ty}"
+                                "'{written}' expects numeric operands, got {ty}"
                             )));
                         }
                     }
                     Ok(Type::Any)
                 }
                 _ => Err(TypeError::new(format!(
-                    "primitive '{name}' cannot be used in a SQL predicate"
+                    "primitive '{written}' cannot be used in a SQL predicate"
                 ))),
             }
         }

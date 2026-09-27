@@ -1,0 +1,6 @@
+import { active_users, normalize_name } from "./models/users.sagate"
+
+# Only this entry file's local queries become standalone SQL output.
+report = active_users
+  & select (row => { id = row.id, name = normalize_name(row.name) })
+  & order [asc .name]

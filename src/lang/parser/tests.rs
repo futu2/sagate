@@ -55,8 +55,14 @@ fn application_and_composition_operators_are_available() {
              q2 = ((select { id = .id }) <<< (where (.active == true))) $ users\n",
     )
     .expect("parse");
-    assert!(program.bindings.iter().any(|binding| binding.name == "&"));
-    assert!(program.bindings.iter().any(|binding| binding.name == "$"));
+    assert!(program
+        .bindings
+        .iter()
+        .any(|binding| binding.name == prelude_symbol("&")));
+    assert!(program
+        .bindings
+        .iter()
+        .any(|binding| binding.name == prelude_symbol("$")));
     let rows = type_check(&program).expect("type check");
     assert_eq!(rows["q"].field("id").unwrap().ty, Type::Int);
     assert_eq!(rows["q2"].field("id").unwrap().ty, Type::Int);
@@ -89,7 +95,7 @@ fn forward_application_remains_an_infix_ast_node() {
     let Expr::Apply { function, .. } = function.as_ref() else {
         panic!("expected an operator application")
     };
-    assert!(matches!(function.as_ref(), Expr::Var(name) if name == "&"));
+    assert!(matches!(function.as_ref(), Expr::Var(name) if *name == prelude_symbol("&")));
 
     let binding = program
         .bindings
@@ -102,7 +108,7 @@ fn forward_application_remains_an_infix_ast_node() {
     let Expr::Apply { function, .. } = function.as_ref() else {
         panic!("expected an operator application")
     };
-    assert!(matches!(function.as_ref(), Expr::Var(name) if name == "$"));
+    assert!(matches!(function.as_ref(), Expr::Var(name) if *name == prelude_symbol("$")));
 }
 
 #[test]
@@ -330,7 +336,7 @@ fn query_signatures_keep_named_row_variables() {
     let select = program
         .bindings
         .iter()
-        .find(|binding| binding.name == "select")
+        .find(|binding| binding.name == prelude_symbol("select"))
         .expect("select prelude binding");
     let Some(Type::Function(projection, result)) = &select.annotation else {
         panic!("expected a curried select signature")
@@ -373,7 +379,7 @@ fn query_signatures_keep_named_row_variables() {
     let where_binding = program
         .bindings
         .iter()
-        .find(|binding| binding.name == "where")
+        .find(|binding| binding.name == prelude_symbol("where"))
         .expect("where prelude binding");
     let Some(Type::Function(predicate, result)) = &where_binding.annotation else {
         panic!("expected a curried where signature")
@@ -403,7 +409,7 @@ fn mapper_signatures_express_output_rows_as_type_level_operations() {
     let map_key = program
         .bindings
         .iter()
-        .find(|b| b.name == "mapKey")
+        .find(|b| b.name == prelude_symbol("mapKey"))
         .unwrap();
     let Type::Function(mapper, result) = map_key.annotation.as_ref().unwrap() else {
         panic!("expected a curried mapKey signature")
@@ -432,7 +438,11 @@ fn mapper_signatures_express_output_rows_as_type_level_operations() {
     assert_eq!(row.as_ref(), &RowExpr::Variable(*input_id));
     assert_eq!(output_mapper.as_ref(), &MapperType::Variable(*mapper_id));
 
-    let merge = program.bindings.iter().find(|b| b.name == "merge").unwrap();
+    let merge = program
+        .bindings
+        .iter()
+        .find(|b| b.name == prelude_symbol("merge"))
+        .unwrap();
     let Type::Function(_, result) = merge.annotation.as_ref().unwrap() else {
         panic!("expected a curried merge signature")
     };

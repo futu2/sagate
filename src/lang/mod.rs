@@ -1,9 +1,11 @@
 mod ast;
 mod checker;
+mod modules;
 mod parser;
 mod relational;
 
 pub(crate) use ast::{Column, Expr, Literal, Mapper, Program, Row, Type};
 pub(crate) use checker::{flatten_apply, substitute, type_check};
+pub(crate) use modules::{link_file, LinkedProgram, OutputBinding};
 pub(crate) use parser::parse;
 pub(crate) use relational::{join_row, AggregateField, AggregateOp, Intrinsic};

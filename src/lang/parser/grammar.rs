@@ -5,6 +5,8 @@ struct Parser {
     next_type_variable: u32,
     lambda_body_depth: usize,
     allow_primitives: bool,
+    /// The file this parser runs over, for module-level diagnostics.
+    file_name: String,
 }
 
 impl Parser {
@@ -16,7 +18,21 @@ impl Parser {
             next_type_variable: 0,
             lambda_body_depth: 0,
             allow_primitives: false,
+            file_name: "<source>".to_owned(),
         })
+    }
+
+    fn with_file_name(mut self, file_name: &str) -> Self {
+        self.file_name = file_name.to_owned();
+        self
+    }
+
+    fn line_at(&self, byte_offset: usize) -> usize {
+        self.source[..byte_offset.min(self.source.len())]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1
     }
 
     fn allowing_primitives(mut self) -> Self {
@@ -77,47 +93,278 @@ impl Parser {
         }
     }
 
-    fn parse_program(&mut self) -> Result<Program, String> {
-        let mut bindings = Vec::new();
+    fn parse_program(&mut self) -> Result<ParsedModule, String> {
+        let mut module = ParsedModule::default();
+        let mut seen_bindings = false;
         while !matches!(self.current().kind, TokenKind::Eof) {
             if self.eat_symbol(";") {
                 continue;
             }
+            // `import` and `export` are contextual keywords. They open a
+            // declaration only in their full syntactic form; `export = 1`
+            // remains an ordinary binding named `export`.
+            if matches!(&self.current().kind, TokenKind::Ident(name) if name == "import")
+                && self.import_looks_like_declaration()
+            {
+                if seen_bindings {
+                    return self.module_error(
+                        "imports must appear before the first binding or export",
+                    );
+                }
+                self.parse_import(&mut module)?;
+                continue;
+            }
+            if matches!(&self.current().kind, TokenKind::Ident(name) if name == "export")
+                && self.export_looks_like_declaration()
+            {
+                seen_bindings = true;
+                self.parse_export_declaration(&mut module)?;
+                continue;
+            }
+            seen_bindings = true;
+            let line = self.current_line();
             if self.eat_ident("let") {
                 let binding = self.parse_binding()?;
-                self.add_binding(&mut bindings, binding)?;
+                self.add_binding(&mut module, line, false, binding)?;
             } else {
                 let binding = self.parse_definition()?;
-                self.add_binding(&mut bindings, binding)?;
+                self.add_binding(&mut module, line, false, binding)?;
             }
         }
-        Ok(Program { bindings })
+        Ok(module)
     }
 
-    fn add_binding(&self, bindings: &mut Vec<Binding>, binding: Binding) -> Result<(), String> {
-        let Some(index) = bindings
+    /// `import` opens a declaration when the next token starts an import
+    /// list (`{` or a name followed by `as`), so a binding named `import`
+    /// keeps parsing as a definition.
+    fn import_looks_like_declaration(&self) -> bool {
+        match self.tokens.get(self.index + 1).map(|token| &token.kind) {
+            Some(TokenKind::Symbol(symbol)) => symbol == "{",
+            Some(TokenKind::Ident(next)) if next == "_" => self.at_operator_section(self.index + 1),
+            Some(TokenKind::Ident(next)) => next != ":" && next != "=" && next != "in",
+            _ => false,
+        }
+    }
+
+    /// `export` opens a declaration for `export { ... }` or
+    /// `export name ... = ...`; anything else is a binding named `export`.
+    fn export_looks_like_declaration(&self) -> bool {
+        match self.tokens.get(self.index + 1).map(|token| &token.kind) {
+            Some(TokenKind::Symbol(symbol)) => symbol == "{",
+            Some(TokenKind::Ident(next)) if next == "_" => self.at_operator_section(self.index + 1),
+            Some(TokenKind::Ident(next)) => next != ":" && next != "=" && next != "in",
+            _ => false,
+        }
+    }
+
+    /// True when `index` starts an operator section `_op_`.
+    fn at_operator_section(&self, index: usize) -> bool {
+        matches!(self.tokens.get(index).map(|token| &token.kind), Some(TokenKind::Ident(name)) if name == "_")
+            && matches!(self.tokens.get(index + 1).map(|token| &token.kind), Some(TokenKind::Symbol(operator)) if is_infix_operator(operator))
+            && matches!(self.tokens.get(index + 2).map(|token| &token.kind), Some(TokenKind::Ident(name)) if name == "_")
+    }
+
+    fn module_error<T>(&self, message: impl Into<String>) -> Result<T, String> {
+        Err(format!("{}:{}: {}", self.file_name, self.current_line(), message.into()))
+    }
+
+    fn current_line(&self) -> usize {
+        self.line_at(self.current().start)
+    }
+
+    fn parse_import(&mut self, module: &mut ParsedModule) -> Result<(), String> {
+        let line = self.current_line();
+        self.bump(); // `import`
+        self.expect_symbol("{")?;
+        let mut entries: Vec<(String, String)> = Vec::new();
+        loop {
+            if self.eat_ident("_") {
+                // Operator section: `_+_ as add` or a bare `_+_`.
+                let operator = match self.bump().kind {
+                    TokenKind::Symbol(operator) if is_infix_operator(&operator) => operator,
+                    _ => return self.module_error("expected an operator between '_' markers"),
+                };
+                if !self.eat_ident("_") {
+                    return self.module_error("expected '_' after operator");
+                }
+                if self.eat_ident("as") {
+                    let local = self.expect_ident()?;
+                    entries.push((local, operator));
+                } else {
+                    entries.push((operator.clone(), operator));
+                }
+            } else {
+                let name = self.expect_ident()?;
+                self.reject_primitive(&name)?;
+                let local = if self.eat_ident("as") {
+                    let alias = self.expect_ident()?;
+                    self.reject_primitive(&alias)?;
+                    alias
+                } else {
+                    name.clone()
+                };
+                entries.push((local, name));
+            }
+            if self.eat_symbol(",") {
+                // A trailing comma before `}` or `from` is allowed.
+                if matches!(&self.current().kind, TokenKind::Symbol(symbol) if symbol == "}")
+                    || matches!(&self.current().kind, TokenKind::Ident(name) if name == "from")
+                {
+                    break;
+                }
+                continue;
+            } else {
+                break;
+            }
+        }
+        self.expect_symbol("}")?;
+        if !self.eat_ident("from") {
+            return self.module_error("expected 'from' after the import list");
+        }
+        let TokenKind::String(path) = self.bump().kind else {
+            return self.module_error("import paths must be string literals");
+        };
+        // Report at the declaration's line; the current token may already sit
+        // past the path on the following line.
+        let import_error = |message: String| {
+            Err(format!("{}:{}: {}", self.file_name, line, message))
+        };
+        if !path.starts_with("./") && !path.starts_with("../") {
+            return import_error(format!(
+                "import path '{path}' must start with './' or '../'"
+            ));
+        }
+        if !path.ends_with(".sagate") {
+            return import_error(format!("import path '{path}' must name a .sagate file"));
+        }
+        for (local, source) in entries {
+            module.imports.push(ImportDecl {
+                local,
+                source,
+                path: path.clone(),
+                line,
+            });
+        }
+        self.eat_symbol(";");
+        Ok(())
+    }
+
+    fn parse_export_declaration(&mut self, module: &mut ParsedModule) -> Result<(), String> {
+        let line = self.current_line();
+        self.bump(); // `export`
+        if self.eat_symbol("{") {
+            loop {
+                let (local, public) = if self.eat_ident("_") {
+                    let operator = match self.bump().kind {
+                        TokenKind::Symbol(operator) if is_infix_operator(&operator) => operator,
+                        _ => {
+                            return self
+                                .module_error("expected an operator between '_' markers")
+                        }
+                    };
+                    if !self.eat_ident("_") {
+                        return self.module_error("expected '_' after operator");
+                    }
+                    if self.eat_ident("as") {
+                        let public = self.expect_ident()?;
+                        self.reject_primitive(&public)?;
+                        (operator.clone(), public)
+                    } else {
+                        (operator.clone(), operator)
+                    }
+                } else {
+                    let local = self.expect_ident()?;
+                    self.reject_primitive(&local)?;
+                    let public = if self.eat_ident("as") {
+                        let public = self.expect_ident()?;
+                        self.reject_primitive(&public)?;
+                        public
+                    } else {
+                        local.clone()
+                    };
+                    (local, public)
+                };
+                module.exports.push(ExportDecl {
+                    public,
+                    local,
+                    line,
+                });
+                if self.eat_symbol(",") {
+                    if matches!(&self.current().kind, TokenKind::Symbol(symbol) if symbol == "}") {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+            self.expect_symbol("}")?;
+            self.eat_symbol(";");
+            return Ok(());
+        }
+        // `export name ... = ...` is a definition plus `export { name }`.
+        // Rewind so the definition itself re-reads the name.
+        let saved = self.index;
+        let name = if matches!(self.current().kind, TokenKind::Ident(ref name) if name == "_") {
+            self.parse_operator_section()?
+        } else {
+            let name = self.expect_ident()?;
+            self.reject_primitive(&name)?;
+            name
+        };
+        self.index = saved;
+        let binding = self.parse_definition()?;
+        if binding.name != name {
+            return self.module_error(format!(
+                "export declaration name '{}' does not match defined name '{}'",
+                name, binding.name
+            ));
+        }
+        // Define-and-export publishes through the binding's own flag, not a
+        // second export entry; otherwise the public name would register twice.
+        self.add_binding(module, line, true, binding)?;
+        Ok(())
+    }
+
+    fn add_binding(
+        &self,
+        module: &mut ParsedModule,
+        line: usize,
+        exported: bool,
+        binding: Binding,
+    ) -> Result<(), String> {
+        let Some(index) = module
+            .bindings
             .iter()
-            .position(|existing| existing.name == binding.name)
+            .position(|existing| existing.binding.name == binding.name)
         else {
-            bindings.push(binding);
+            module.bindings.push(ParsedBinding {
+                line,
+                exported,
+                binding,
+            });
             return Ok(());
         };
-        let existing = &bindings[index];
         let operator_overload = is_infix_operator(&binding.name);
-        let existing_cases_are_annotated = match &existing.expr {
+        let existing_cases_are_annotated = match &module.bindings[index].binding.expr {
             Expr::Overloaded(cases) => cases.iter().all(|case| case.annotation.is_some()),
-            _ => existing.annotation.is_some(),
+            _ => module.bindings[index].binding.annotation.is_some(),
         };
-        if !operator_overload && (!existing_cases_are_annotated || binding.annotation.is_none()) {
+        if !operator_overload
+            && (!existing_cases_are_annotated || binding.annotation.is_none())
+        {
             return self.error(format!("duplicate binding '{}'", binding.name));
         }
 
-        let existing = &mut bindings[index];
-        let existing_expr = std::mem::replace(&mut existing.expr, Expr::Literal(Literal::Null));
+        let existing = &mut module.bindings[index];
+        let existing_expr = std::mem::replace(
+            &mut existing.binding.expr,
+            Expr::Literal(Literal::Null),
+        );
+        let existing_annotation = existing.binding.annotation.take();
         let mut cases = match existing_expr {
             Expr::Overloaded(cases) => cases,
             expr => vec![OverloadCase {
-                annotation: existing.annotation.take(),
+                annotation: existing_annotation,
                 expr: Box::new(expr),
             }],
         };
@@ -125,8 +372,12 @@ impl Parser {
             annotation: binding.annotation,
             expr: Box::new(binding.expr),
         });
-        existing.annotation = None;
-        existing.expr = Expr::Overloaded(cases);
+        existing.binding.annotation = None;
+        existing.binding.expr = Expr::Overloaded(cases);
+        // Overloads are published as one name-level set.
+        if exported {
+            existing.exported = true;
+        }
         Ok(())
     }
 
@@ -705,8 +956,7 @@ impl Parser {
 
 }
 
-fn is_infix_operator(operator: &str) -> bool {
-    !operator.is_empty()
+pub(super) fn is_infix_operator(operator: &str) -> bool {    !operator.is_empty()
         && !operator
             .chars()
             .any(|character| character.is_ascii_alphanumeric() || character == '_')

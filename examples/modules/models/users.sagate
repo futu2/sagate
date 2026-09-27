@@ -1,0 +1,9 @@
+# A private table binding. Only the exported names below are visible to
+# importing files; `users` stays local to this module.
+users : query { id = int, name = string, active = bool } =
+  table "public" "users"
+
+export active_users = users & where (.active == true)
+
+# A SQL function re-exported for other modules to reuse.
+export normalize_name : string -> string = sql "LOWER($1)"

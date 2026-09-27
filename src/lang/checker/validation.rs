@@ -16,28 +16,19 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> 
         if is_sql_template_definition(&binding.expr)
             && !has_sql_template_function_signature(&binding.expr, binding.annotation.as_ref())
         {
-            return Err(TypeError::new(format!(
-                "definition '{}' SQL template requires a function type signature",
-                binding.name
-            )));
+            return Err(TypeError::new("SQL template requires a function type signature")
+                .at_definition(&binding.name, "definition"));
         }
         if let Some(annotation) = &binding.annotation {
             validate_type_kinds(annotation).map_err(|error| {
-                TypeError::new(format!(
-                    "definition '{}' kind checking: {}",
-                    binding.name, error
-                ))
+                TypeError::new(error.to_string())
+                    .at_definition(&binding.name, "kind checking")
             })?;
         }
         let expanded = expand_aliases(&binding.expr, &definitions, &environment);
         if let Some(annotation) = &binding.annotation {
             check_expr_against(&binding.expr, annotation, &environment).map_err(
-                |error| {
-                    TypeError::new(format!(
-                        "definition '{}' signature: {}",
-                        binding.name, error
-                    ))
-                },
+                |error| error.at_definition(&binding.name, "signature"),
             )?;
         }
         let inferred = if let Some(annotation) = &binding.annotation {
@@ -45,25 +36,16 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> 
                 annotation.clone()
             } else {
                 infer_expr(&expanded, &environment).map_err(|error| {
-                    TypeError::new(format!(
-                        "definition '{}' inference: {}",
-                        binding.name, error
-                    ))
+                    error.at_definition(&binding.name, "inference")
                 })?
             }
         } else {
             infer_expr(&expanded, &environment).map_err(|error| {
-                TypeError::new(format!(
-                    "definition '{}' inference: {}",
-                    binding.name, error
-                ))
+                error.at_definition(&binding.name, "inference")
             })?
         };
         let ty = apply_annotation(inferred, binding.annotation.as_ref()).map_err(|error| {
-            TypeError::new(format!(
-                "definition '{}' annotation: {}",
-                binding.name, error
-            ))
+            error.at_definition(&binding.name, "annotation")
         })?;
         if let Some(row) = relation_row(&ty) {
             query_rows.insert(binding.name.clone(), row);
@@ -252,8 +234,7 @@ fn check_expr_against(
                     "type annotation {expected} does not match inferred type {inferred}"
                 )))
             }
-        }
-    }
+        }    }
 }
 
 fn apply_annotation(inferred: Type, annotation: Option<&Type>) -> Result<Type, TypeError> {

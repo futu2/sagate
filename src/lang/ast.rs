@@ -7,6 +7,49 @@ pub struct Program {
     pub bindings: Vec<Binding>,
 }
 
+/// One imported name: `import { orders as recent_orders } from "./sales.sagate"`
+/// introduces `recent_orders` (local) bound to the target's `orders` (source).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportDecl {
+    /// Name usable inside this module.
+    pub local: String,
+    /// Public name looked up in the target module's export table.
+    pub source: String,
+    /// The written path text, retained for error messages.
+    pub path: String,
+    /// One-based line of the `import` keyword.
+    pub line: usize,
+}
+
+/// One entry of an export list or a define-and-export declaration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportDecl {
+    /// Public name other modules import.
+    pub public: String,
+    /// Local definition or import being published.
+    pub local: String,
+    /// One-based line of the `export` keyword.
+    pub line: usize,
+}
+
+/// A top-level binding together with the module metadata the linker needs:
+/// where it was declared and whether `export name = ...` published it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParsedBinding {
+    pub line: usize,
+    pub exported: bool,
+    pub binding: Binding,
+}
+
+/// The module-level shape of one parsed source file. Imports and exports are
+/// declarations, not bindings; the linker resolves them against other modules.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParsedModule {
+    pub imports: Vec<ImportDecl>,
+    pub exports: Vec<ExportDecl>,
+    pub bindings: Vec<ParsedBinding>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Binding {
     pub name: String,
@@ -562,19 +605,38 @@ impl Row {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeError {
     message: String,
+    /// The definition being checked when the error surfaced, plus the checker
+    /// stage ("inference", "signature", ...). The linker maps the name back
+    /// to its original file and spelling for source-facing diagnostics.
+    context: Option<(String, String)>,
 }
 
 impl TypeError {
     pub(super) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            context: None,
         }
+    }
+
+    pub(super) fn at_definition(mut self, name: &str, stage: &str) -> Self {
+        if self.context.is_none() {
+            self.context = Some((name.to_owned(), stage.to_owned()));
+        }
+        self
+    }
+
+    pub(super) fn definition(&self) -> Option<&str> {
+        self.context.as_ref().map(|(name, _)| name.as_str())
     }
 }
 
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        match &self.context {
+            Some((name, stage)) => write!(f, "definition '{name}' {stage}: {}", self.message),
+            None => f.write_str(&self.message),
+        }
     }
 }
 

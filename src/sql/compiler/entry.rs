@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::lang::{
     flatten_apply, substitute, type_check, AggregateField, AggregateOp, Column, Expr, Intrinsic,
-    Literal, Mapper, Program, Row,
+    Literal, Mapper, OutputBinding, Program, Row,
 };
 
 use super::model::{CompileError, CompiledQuery, Relation};
@@ -50,6 +50,56 @@ pub(crate) fn compile_with_dialect(
                 row: relation.row,
             });
         }
+    }
+    Ok(result)
+}
+
+/// Compile a linked module program. Every binding is type-checked (including
+/// private dependencies), but only the entry file's locally defined queries
+/// are lowered to standalone SQL, reported under their original names.
+pub(crate) fn compile_linked_with_dialect(
+    linked: &crate::lang::LinkedProgram,
+    dialect: &str,
+) -> Result<Vec<CompiledQuery>, String> {
+    let dialect = sqlglot_rust::Dialect::from_str(dialect)
+        .ok_or_else(|| format!("unknown SQL dialect '{dialect}'"))?;
+    let known_rows = type_check(&linked.program)
+        .map_err(|error| linked.wrap_error(error))?;
+    let program = &linked.program;
+    let definitions: HashMap<String, &Expr> = program
+        .bindings
+        .iter()
+        .map(|binding| (binding.name.clone(), &binding.expr))
+        .collect();
+    let mut counter = 0u32;
+    let mut result = Vec::with_capacity(linked.outputs.len());
+    for output in &linked.outputs {
+        let OutputBinding { symbol, name } = output;
+        let Some(row) = known_rows.get(symbol) else {
+            continue;
+        };
+        let expr = program
+            .bindings
+            .iter()
+            .find(|binding| &binding.name == symbol)
+            .map(|binding| &binding.expr)
+            .ok_or_else(|| format!("missing output binding '{symbol}'"))?;
+        let mut relation = compile_expr(
+            expr,
+            &definitions,
+            &HashMap::new(),
+            &known_rows,
+            &mut counter,
+        )?;
+        relation.row = row.clone();
+        let statement = attach_ctes(relation.statement, relation.ctes);
+        let statement = sqlglot_rust::optimizer::optimize(*statement)
+            .map_err(|error| error.to_string())?;
+        result.push(CompiledQuery {
+            name: name.clone(),
+            sql: render_sql(Box::new(statement), dialect),
+            row: relation.row,
+        });
     }
     Ok(result)
 }

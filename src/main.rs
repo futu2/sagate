@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env,
     io::{self, Read},
     process::ExitCode,
 };
@@ -16,25 +16,23 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let source = match input {
+    let compile_result = match input {
         None | Some("-") => {
             let mut input = String::new();
             if let Err(error) = io::stdin().read_to_string(&mut input) {
                 eprintln!("sagate: cannot read stdin: {error}");
                 return ExitCode::from(1);
             }
-            input
+            sagate::compile_source_with_dialect(&input, dialect)
         }
-        Some(path) => match fs::read_to_string(path) {
-            Ok(source) => source,
-            Err(error) => {
-                eprintln!("sagate: cannot read {path}: {error}");
-                return ExitCode::from(1);
-            }
-        },
+        Some(path) => {
+            // A file path compiles through the module loader, which follows
+            // relative imports from the file's directory.
+            sagate::compile_file_with_dialect(path, dialect)
+        }
     };
 
-    match sagate::compile_source_with_dialect(&source, dialect) {
+    match compile_result {
         Ok(queries) => {
             for query in queries {
                 println!("-- query {}\n{};\n", query.name, query.sql);
