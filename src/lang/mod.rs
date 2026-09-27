@@ -1,10 +1,9 @@
 mod ast;
 mod checker;
 mod parser;
+mod relational;
 
-pub use ast::{
-    AggregateField, AggregateOp, Binding, Column, Expr, Extent, Kind, Literal, Mapper, MapperType,
-    OverloadCase, Program, Row, RowExpr, Type, TypeError,
-};
-pub use checker::{flatten_apply, substitute, type_check};
-pub use parser::parse;
+pub(crate) use ast::{Column, Expr, Literal, Mapper, Program, Row, Type};
+pub(crate) use checker::{flatten_apply, substitute, type_check};
+pub(crate) use parser::parse;
+pub(crate) use relational::{join_row, AggregateField, AggregateOp, Intrinsic};

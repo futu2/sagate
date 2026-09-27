@@ -7,7 +7,7 @@ use sqlglot_rust::ast::{Cte, Statement};
 pub struct CompiledQuery {
     pub name: String,
     pub sql: String,
-    pub row: Row,
+    pub(crate) row: Row,
 }
 
 #[derive(Clone, Debug, PartialEq)]

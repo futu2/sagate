@@ -210,9 +210,6 @@ fn compile_aggregate(
     for field in fields {
         let source = field.field.as_deref().map(|name| sql_column(name, Some("q")));
         let expression = match &field.operation {
-            AggregateOp::Named(_) => {
-                return Err(CompileError::new("unresolved aggregate operation"));
-            }
             AggregateOp::Group => {
                 let source = source
                     .ok_or_else(|| CompileError::new("group expects a field reference"))?;
@@ -247,9 +244,6 @@ fn compile_aggregate(
         };
         selections.push(select_expr(expression, Some(field.alias.clone())));
         let ty = match &field.operation {
-            AggregateOp::Named(_) => {
-                return Err(CompileError::new("unresolved aggregate operation"));
-            }
             AggregateOp::Count => crate::lang::Type::Int,
             AggregateOp::Avg => crate::lang::Type::Float,
             AggregateOp::Group | AggregateOp::Sum | AggregateOp::Min | AggregateOp::Max => field
@@ -282,10 +276,10 @@ fn compile_join(
     left: Relation,
     right: Relation,
     condition: SqlExpr,
-    kind: &str,
+    kind: Intrinsic,
     counter: &mut u32,
 ) -> Result<Relation, CompileError> {
-    let row = Row::joined(&left.row, &right.row, kind);
+    let row = crate::lang::join_row(&left.row, &right.row, kind);
     let selections = if row.columns.is_empty() {
         vec![
             SelectItem::QualifiedWildcard {
@@ -318,9 +312,9 @@ fn compile_join(
             .collect()
     };
     let join_type = match kind {
-        "__joinLeft" => JoinType::Left,
-        "__joinRight" => JoinType::Right,
-        "__joinFull" => JoinType::Full,
+        Intrinsic::JoinLeft => JoinType::Left,
+        Intrinsic::JoinRight => JoinType::Right,
+        Intrinsic::JoinFull => JoinType::Full,
         _ => JoinType::Inner,
     };
     let Relation {

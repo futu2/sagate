@@ -307,27 +307,6 @@ pub fn flatten_apply(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     (current, args)
 }
 
-/// The scalar primitives an infix operator can name. User-spelled operators
-/// are rewritten to the primitive they resolve to, so overrides and the
-/// declarations decide their semantics and typing.
-pub fn is_scalar_primitive(name: &str) -> bool {
-    matches!(
-        name,
-        "__eq" | "__ne"
-            | "__lt"
-            | "__le"
-            | "__gt"
-            | "__ge"
-            | "__add"
-            | "__sub"
-            | "__mul"
-            | "__div"
-            | "__mod"
-            | "__and"
-            | "__or"
-    )
-}
-
 fn relation_row_expr(ty: Type, state: &mut InferState) -> Result<RowExpr, TypeError> {
     if let Some(row) = row_expr_from_type(&ty) {
         return Ok(row);

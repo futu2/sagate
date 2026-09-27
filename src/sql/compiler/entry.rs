@@ -1,17 +1,18 @@
 use std::collections::HashMap;
 
 use crate::lang::{
-    flatten_apply, substitute, type_check, AggregateField, AggregateOp, Column, Expr, Literal,
-    Mapper, Program, Row,
+    flatten_apply, substitute, type_check, AggregateField, AggregateOp, Column, Expr, Intrinsic,
+    Literal, Mapper, Program, Row,
 };
 
 use super::model::{CompileError, CompiledQuery, Relation};
 
-pub fn compile(program: &Program) -> Result<Vec<CompiledQuery>, String> {
+#[cfg(test)]
+pub(crate) fn compile(program: &Program) -> Result<Vec<CompiledQuery>, String> {
     compile_with_dialect(program, "ansi")
 }
 
-pub fn compile_with_dialect(
+pub(crate) fn compile_with_dialect(
     program: &Program,
     dialect: &str,
 ) -> Result<Vec<CompiledQuery>, String> {
@@ -111,7 +112,6 @@ fn compile_expr(
         }
         Expr::RowLiteral(_)
         | Expr::List(_)
-        | Expr::Mapper { .. }
         | Expr::Overloaded(_)
         | Expr::Literal(_)
         | Expr::SqlTemplate(_)
@@ -169,8 +169,8 @@ fn compile_application(
     let Expr::Var(name) = head else {
         return Err("only prelude functions can produce SQL relations".to_owned());
     };
-    match name.as_str() {
-        "__table" => {
+    match Intrinsic::from_name(name) {
+        Some(Intrinsic::Table) => {
             if arguments.len() != 2 {
                 return Err("table expects a schema name and table name".to_owned());
             }
@@ -182,7 +182,7 @@ fn compile_application(
             };
             compile_table_path(schema, table)
         }
-        "__where" => {
+        Some(Intrinsic::Where) => {
             if arguments.len() != 2 {
                 return Err("where expects a predicate and a relation".to_owned());
             }
@@ -192,7 +192,7 @@ fn compile_application(
                 .map_err(|error| error.to_string())?;
             compile_where(inner, condition, counter).map_err(|error| error.to_string())
         }
-        "__select" => {
+        Some(Intrinsic::Select) => {
             if arguments.len() != 2 {
                 return Err("select expects a projection and a relation".to_owned());
             }
@@ -202,7 +202,7 @@ fn compile_application(
             compile_select(inner, param, fields, definitions, counter)
                 .map_err(|error| error.to_string())
         }
-        "__mapKey" => {
+        Some(Intrinsic::MapKey) => {
             if arguments.len() != 2 {
                 return Err("mapKey expects a mapper and a relation".to_owned());
             }
@@ -211,7 +211,7 @@ fn compile_application(
             let mapper = mapper_value(arguments[0], true, definitions)?;
             compile_map_key(inner, &mapper, counter).map_err(|error| error.to_string())
         }
-        "__mapValue" => {
+        Some(Intrinsic::MapValue) => {
             if arguments.len() != 2 {
                 return Err("mapValue expects a mapper and a relation".to_owned());
             }
@@ -220,7 +220,7 @@ fn compile_application(
             let mapper = mapper_value(arguments[0], false, definitions)?;
             compile_map_value(inner, &mapper, counter).map_err(|error| error.to_string())
         }
-        "__agg" => {
+        Some(Intrinsic::Aggregate) => {
             if arguments.len() != 2 {
                 return Err("agg expects a projection and a relation".to_owned());
             }
@@ -230,7 +230,7 @@ fn compile_application(
             compile_aggregate(inner, &fields, definitions, counter)
                 .map_err(|error| error.to_string())
         }
-        "__joinInner" | "__joinLeft" | "__joinRight" | "__joinFull" => {
+        Some(intrinsic) if intrinsic.is_join() => {
             if arguments.len() != 3 {
                 return Err("join expects a right query, predicate, and left query".to_owned());
             }
@@ -240,9 +240,9 @@ fn compile_application(
                 compile_expr(arguments[2], definitions, locals, known_rows, counter)?;
             let condition = join_condition(arguments[1], &left.row, &right.row, definitions)
                 .map_err(|error| error.to_string())?;
-            compile_join(left, right, condition, name, counter).map_err(|error| error.to_string())
+            compile_join(left, right, condition, intrinsic, counter).map_err(|error| error.to_string())
         }
-        "__merge" => {
+        Some(Intrinsic::Merge) => {
             if arguments.len() != 2 {
                 return Err("merge expects two relations".to_owned());
             }
@@ -252,7 +252,7 @@ fn compile_application(
                 compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
             compile_merge(left, right, counter).map_err(|error| error.to_string())
         }
-        "__order" => {
+        Some(Intrinsic::Order) => {
             if arguments.len() != 2 {
                 return Err("order expects sort keys and a relation".to_owned());
             }
@@ -261,7 +261,7 @@ fn compile_application(
             let items = order_by_items(arguments[0], &inner.row, definitions)?;
             compile_order(inner, items, counter).map_err(|error| error.to_string())
         }
-        "__limit" => {
+        Some(Intrinsic::Limit) => {
             if arguments.len() != 2 {
                 return Err("limit expects a count and a relation".to_owned());
             }

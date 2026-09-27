@@ -75,13 +75,13 @@ fn aggregate_key(
                 }
                 return aggregate_key(&expanded, definitions);
             }
-            let operation = match name.as_str() {
-                "group" | "__group" => AggregateOp::Group,
-                "count" | "__count" => AggregateOp::Count,
-                "sum" | "__sum" => AggregateOp::Sum,
-                "avg" | "__avg" => AggregateOp::Avg,
-                "min" | "__min" => AggregateOp::Min,
-                "max" | "__max" => AggregateOp::Max,
+            let operation = match Intrinsic::from_public_name(name) {
+                Some(Intrinsic::Group) => AggregateOp::Group,
+                Some(Intrinsic::Count) => AggregateOp::Count,
+                Some(Intrinsic::Sum) => AggregateOp::Sum,
+                Some(Intrinsic::Avg) => AggregateOp::Avg,
+                Some(Intrinsic::Min) => AggregateOp::Min,
+                Some(Intrinsic::Max) => AggregateOp::Max,
                 _ => return Err(format!("unknown aggregate '{name}'")),
             };
             let field =
@@ -128,10 +128,6 @@ fn mapper_value(
     definitions: &HashMap<String, &Expr>,
 ) -> Result<Mapper, String> {
     match expr {
-        Expr::Mapper {
-            mapper,
-            key: actual,
-        } if *actual == key => Ok(mapper.clone()),
         Expr::Lambda { param, body, .. } if matches!(body.as_ref(), Expr::Var(name) if name == param) => {
             Ok(Mapper::Identity)
         }
@@ -168,12 +164,12 @@ fn mapper_value(
             }
             match (head, arguments.as_slice()) {
                 (Expr::Var(name), [Expr::Literal(Literal::String(value))])
-                    if key && name == "__prefix" =>
+                    if key && Intrinsic::from_name(name) == Some(Intrinsic::Prefix) =>
                 {
                     Ok(Mapper::Prefix(value.clone()))
                 }
                 (Expr::Var(name), [Expr::Literal(Literal::String(value))])
-                    if key && name == "__suffix" =>
+                    if key && Intrinsic::from_name(name) == Some(Intrinsic::Suffix) =>
                 {
                     Ok(Mapper::Suffix(value.clone()))
                 }
@@ -181,11 +177,21 @@ fn mapper_value(
                 _ => Err("mapValue expects a value mapper".to_owned()),
             }
         }
-        Expr::Var(name) if name == "__snake" => Ok(Mapper::Snake),
-        Expr::Var(name) if name == "__kebab" => Ok(Mapper::Kebab),
-        Expr::Var(name) if name == "__camel" => Ok(Mapper::Camel),
-        Expr::Var(name) if name == "__maybe" => Ok(Mapper::Maybe),
-        Expr::Var(name) if name == "__list" => Ok(Mapper::List),
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Snake) => {
+            Ok(Mapper::Snake)
+        }
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Kebab) => {
+            Ok(Mapper::Kebab)
+        }
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Camel) => {
+            Ok(Mapper::Camel)
+        }
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Maybe) => {
+            Ok(Mapper::Maybe)
+        }
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::List) => {
+            Ok(Mapper::List)
+        }
         _ if key => Err("mapKey expects a key mapper".to_owned()),
         _ => Err("mapValue expects a value mapper".to_owned()),
     }

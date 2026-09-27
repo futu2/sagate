@@ -56,11 +56,6 @@ pub enum Expr {
     /// A list literal. Lists appear as the sort-key payload of `order`: the
     /// key function maps a row to a list of `asc`/`desc` tagged values.
     List(Vec<Expr>),
-    Mapper {
-        mapper: Mapper,
-        key: bool,
-    },
-
     /// A name with multiple definitions. Overloads are resolved from the
     /// argument type at application time; keeping the cases in the AST also
     /// lets SQL lowering inline the same selected definition.
@@ -71,27 +66,6 @@ pub enum Expr {
 pub struct OverloadCase {
     pub annotation: Option<Type>,
     pub expr: Box<Expr>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum AggregateOp {
-    Named(String),
-    Group,
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
-}
-
-/// One extracted aggregate column: `{total = sum .total}` contributes
-/// `(total, Sum, Some("total"))`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct AggregateField {
-    pub alias: String,
-    pub operation: AggregateOp,
-    pub function: Option<String>,
-    pub field: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -184,6 +158,8 @@ fn camel_case(input: &str) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)]
+#[allow(dead_code)] // Some type terms are produced only by unification paths.
 pub enum Type {
     Int,
     String,
@@ -518,6 +494,7 @@ impl Row {
         }
     }
 
+    #[allow(dead_code)] // Kept for callers that construct an open catalog row.
     pub fn open(columns: Vec<Column>) -> Self {
         let mut row = Self::new(columns);
         row.extent = Extent::Open;
@@ -551,23 +528,6 @@ impl Row {
                 Extent::Closed
             },
         }
-    }
-
-    /// Combine the visible rows from a join, including fields that may be
-    /// absent on the nullable side of an outer join.
-    pub(crate) fn joined(left: &Self, right: &Self, kind: &str) -> Self {
-        let mut row = right.merge(left);
-        let nullable_left = matches!(kind, "__joinRight" | "__joinFull");
-        let nullable_right = matches!(kind, "__joinLeft" | "__joinFull");
-        for column in &mut row.columns {
-            let from_left = left.field(&column.name).is_some();
-            if (from_left && nullable_left) || (!from_left && nullable_right) {
-                if !matches!(column.ty, Type::Maybe(_)) {
-                    column.ty = Type::Maybe(Box::new(column.ty.clone()));
-                }
-            }
-        }
-        row
     }
 
     pub fn map_key(&self, mapper: &Mapper) -> Self {

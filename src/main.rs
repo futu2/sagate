@@ -34,8 +34,7 @@ fn main() -> ExitCode {
         },
     };
 
-    match sagate::parse(&source).and_then(|program| sagate::compile_with_dialect(&program, dialect))
-    {
+    match sagate::compile_source_with_dialect(&source, dialect) {
         Ok(queries) => {
             for query in queries {
                 println!("-- query {}\n{};\n", query.name, query.sql);

@@ -70,13 +70,12 @@ right = 1 + 2
 ```
 
 Both applications elaborate to applying `+` to `1` and then to `2`.
-Comparison operators use the same function application form; the SQL backend
-recognizes the built-in comparison functions when they occur in a `where`
-predicate. Arithmetic, comparison, and boolean operator sections are exported
-by the prelude, so they can be passed or partially applied like any other
-function. Arithmetic overloads are explicit: `+` and `-` each have an `int`
-case and a `float` case. There is no numeric type variable or implicit numeric
-coercion, so mixed expressions such as `1 + 2.0` are rejected.
+Comparison operators use the same function application form. The prelude gives
+arithmetic, comparison, and boolean operators SQL expression templates, so they
+can be passed or partially applied like any other function and still lower in a
+`where` predicate. Arithmetic overloads are explicit: `+` and `-` each have an
+`int` case and a `float` case. There is no numeric type variable or implicit
+numeric coercion, so mixed expressions such as `1 + 2.0` are rejected.
 
 Named functions can have a finite overload set. Give each case its own concrete
 function signature; application selects the case whose argument types match:
@@ -271,15 +270,18 @@ nix run . -- examples/users.sagate
 The CLI reads a path argument, or stdin when no path is supplied or when passed
 `-`.
 
-## Rust modules
+## Rust API
 
-- `src/lang/`: source AST, lexer/parser, row types, and type checking.
-- `src/sql.rs`: typed relational compilation to quoted SQL subqueries.
-- `src/main.rs`: CLI entry point.
-- `flake.nix`: reproducible Nix development shell and package.
-
-Rust callers can select a dialect with `compile_with_dialect`:
+The crate exposes source-oriented compilation functions. The parser, checker,
+and SQL lowering modules remain internal implementation details:
 
 ```rust
-let queries = sagate::compile_with_dialect(&program, "postgres")?;
+let queries = sagate::compile_source_with_dialect(source, "postgres")?;
+for query in queries {
+    println!("{}: {}", query.name, query.sql);
+}
 ```
+
+`compile_source` uses the ANSI dialect. The command-line binary is in
+`src/main.rs`; `flake.nix` provides the reproducible development shell and
+package.

@@ -120,14 +120,17 @@ fn resolve_order_key(
 ) -> Result<(bool, Expr), String> {
     let (head, arguments) = flatten_apply(element);
     if let Expr::Var(name) = head {
-        match name.as_str() {
-            "__asc" if arguments.len() == 1 => {
+        match Intrinsic::from_name(name) {
+            Some(Intrinsic::Asc) if arguments.len() == 1 => {
                 return Ok((true, arguments[0].clone()));
             }
-            "__desc" if arguments.len() == 1 => {
+            Some(Intrinsic::Desc) if arguments.len() == 1 => {
                 return Ok((false, arguments[0].clone()));
             }
-            _ if !name.starts_with("__") => {
+            None => {
+                if name.starts_with("__") {
+                    return Err(format!("unknown primitive '{name}'"));
+                }
                 let definition = definitions
                     .get(name)
                     .ok_or_else(|| format!("unknown function '{name}'"))?;
@@ -304,7 +307,7 @@ fn instantiate_sql_template_ast(
             .unwrap_or(SqlExpr::Parameter(parameter)),
         other => other,
     });
-    normalize_template_null_comparison(expression, &sql_arguments)
+    normalize_template_null_comparison(expression, sql_arguments)
 }
 
 fn normalize_template_null_comparison(

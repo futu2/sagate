@@ -53,12 +53,6 @@ fn infer_expr_with_state(
             }
             Ok(Type::List(Box::new(element_ty.unwrap_or(Type::Any))))
         }
-        Expr::Mapper { mapper, key: true } => Ok(Type::KeyMapperWitness(Box::new(
-            MapperType::Known(mapper.clone()),
-        ))),
-        Expr::Mapper { mapper, key: false } => Ok(Type::ValueMapperWitness(Box::new(
-            MapperType::Known(mapper.clone()),
-        ))),
         Expr::Overloaded(cases) => {
             let mut types = Vec::with_capacity(cases.len());
             let base_state = state.clone();
@@ -132,8 +126,9 @@ fn infer_application(
         return infer_expr_with_state(&reduced, environment, state);
     }
     if let Expr::Var(name) = head {
-        match name.as_str() {
-            "__table" => {
+        if let Some(intrinsic) = Intrinsic::from_name(name) {
+        match intrinsic {
+            Intrinsic::Table => {
                 if arguments.len() != 2 {
                     return Ok(Type::Any);
                 }
@@ -148,7 +143,7 @@ fn infer_application(
                 // visible fields used by a query.
                 return Ok(Type::Relation(Row::default()));
             }
-            "__where" => {
+            Intrinsic::Where => {
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
@@ -178,7 +173,7 @@ fn infer_application(
                 }
                 return Ok(type_from_row_expr(row_expr));
             }
-            "__select" => {
+            Intrinsic::Select => {
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
@@ -225,7 +220,7 @@ fn infer_application(
                 return relation_of_row_type(resolve_type(*output, &state.substitutions))
                     .ok_or_else(|| TypeError::new("select result must be a row"));
             }
-            "__mapKey" => {
+            Intrinsic::MapKey => {
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
@@ -251,7 +246,7 @@ fn infer_application(
                     Box::new(row),
                 )));
             }
-            "__mapValue" => {
+            Intrinsic::MapValue => {
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
@@ -277,7 +272,7 @@ fn infer_application(
                     Box::new(row),
                 )));
             }
-            "__agg" => {
+            Intrinsic::Aggregate => {
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
@@ -310,7 +305,7 @@ fn infer_application(
                 return relation_of_row_type(resolve_type(*output, &state.substitutions))
                     .ok_or_else(|| TypeError::new("agg result must be a row"));
             }
-            "__joinInner" | "__joinLeft" | "__joinRight" | "__joinFull" => {
+            intrinsic if intrinsic.is_join() => {
                 if arguments.len() != 3 {
                     return Ok(Type::Function(
                         Box::new(Type::Any),
@@ -335,9 +330,9 @@ fn infer_application(
                 if matches!(arguments[1], Expr::Lambda { .. }) {
                     check_join_row_expression(arguments[1], &left, &right)?;
                 }
-                return Ok(Type::Relation(Row::joined(&left, &right, name)));
+                return Ok(Type::Relation(join_row(&left, &right, intrinsic)));
             }
-            "__merge" => {
+            Intrinsic::Merge => {
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
@@ -358,7 +353,7 @@ fn infer_application(
                     Box::new(newer),
                 )));
             }
-            "__asc" | "__desc" => {
+            Intrinsic::Asc | Intrinsic::Desc => {
                 if arguments.len() != 1 {
                     return Ok(Type::Direction);
                 }
@@ -370,7 +365,7 @@ fn infer_application(
                 }
                 return Ok(Type::Direction);
             }
-            "__order" => {
+            Intrinsic::Order => {
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
@@ -407,7 +402,7 @@ fn infer_application(
                 }
                 return Ok(type_from_row_expr(row_expr));
             }
-            "__limit" => {
+            Intrinsic::Limit => {
                 if arguments.len() != 2 {
                     return Ok(Type::Function(Box::new(Type::Any), Box::new(Type::Any)));
                 }
@@ -427,6 +422,7 @@ fn infer_application(
                 return Ok(type_from_row_expr(row_expr));
             }
             _ => {}
+        }
         }
     }
     let (function, argument) = match expr {

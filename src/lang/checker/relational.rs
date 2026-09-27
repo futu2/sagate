@@ -10,7 +10,6 @@ fn aggregate_row(input: &Row, fields: &[AggregateField]) -> Result<Row, TypeErro
             None => Type::Any,
         };
         let ty = match &field.operation {
-            AggregateOp::Named(_) => return Err(TypeError::new("unresolved aggregate operation")),
             AggregateOp::Count => Type::Int,
             AggregateOp::Group | AggregateOp::Min | AggregateOp::Max => source_type,
             AggregateOp::Sum | AggregateOp::Avg => {
@@ -60,7 +59,6 @@ fn check_join_row_expression(expr: &Expr, left: &Row, right: &Row) -> Result<(),
 
 fn mapper_value(expr: &Expr) -> Result<Mapper, TypeError> {
     match expr {
-        Expr::Mapper { mapper, .. } => Ok(mapper.clone()),
         Expr::Lambda { param, body, .. } if matches!(body.as_ref(), Expr::Var(name) if name == param) => {
             Ok(Mapper::Identity)
         }
@@ -78,23 +76,33 @@ fn mapper_value(expr: &Expr) -> Result<Mapper, TypeError> {
             }
             match (head, arguments.as_slice()) {
                 (Expr::Var(name), [Expr::Literal(Literal::String(value))])
-                    if name == "__prefix" =>
+                    if Intrinsic::from_name(name) == Some(Intrinsic::Prefix) =>
                 {
                     Ok(Mapper::Prefix(value.clone()))
                 }
                 (Expr::Var(name), [Expr::Literal(Literal::String(value))])
-                    if name == "__suffix" =>
+                    if Intrinsic::from_name(name) == Some(Intrinsic::Suffix) =>
                 {
                     Ok(Mapper::Suffix(value.clone()))
                 }
                 _ => Err(TypeError::new("expected a mapper value")),
             }
         }
-        Expr::Var(name) if name == "__snake" => Ok(Mapper::Snake),
-        Expr::Var(name) if name == "__kebab" => Ok(Mapper::Kebab),
-        Expr::Var(name) if name == "__camel" => Ok(Mapper::Camel),
-        Expr::Var(name) if name == "__maybe" => Ok(Mapper::Maybe),
-        Expr::Var(name) if name == "__list" => Ok(Mapper::List),
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Snake) => {
+            Ok(Mapper::Snake)
+        }
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Kebab) => {
+            Ok(Mapper::Kebab)
+        }
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Camel) => {
+            Ok(Mapper::Camel)
+        }
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Maybe) => {
+            Ok(Mapper::Maybe)
+        }
+        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::List) => {
+            Ok(Mapper::List)
+        }
         _ => Err(TypeError::new("expected a mapper value")),
     }
 }
@@ -147,13 +155,13 @@ fn aggregate_key(
     };
     match head {
         Expr::Var(name) => {
-            let operation = match name.as_str() {
-                "group" | "__group" => AggregateOp::Group,
-                "count" | "__count" => AggregateOp::Count,
-                "sum" | "__sum" => AggregateOp::Sum,
-                "avg" | "__avg" => AggregateOp::Avg,
-                "min" | "__min" => AggregateOp::Min,
-                "max" | "__max" => AggregateOp::Max,
+            let operation = match Intrinsic::from_public_name(name) {
+                Some(Intrinsic::Group) => AggregateOp::Group,
+                Some(Intrinsic::Count) => AggregateOp::Count,
+                Some(Intrinsic::Sum) => AggregateOp::Sum,
+                Some(Intrinsic::Avg) => AggregateOp::Avg,
+                Some(Intrinsic::Min) => AggregateOp::Min,
+                Some(Intrinsic::Max) => AggregateOp::Max,
                 _ => {
                     return Err(TypeError::new(format!(
                         "unknown aggregate '{name}'"
@@ -282,20 +290,21 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
             // ordinary inference. Here the row-aware pass only needs to
             // validate their row arguments; the SQL lowerer instantiates the
             // template after validating their types.
-            if !name.starts_with("__") {
+            let intrinsic = Intrinsic::from_name(name).or_else(|| Intrinsic::from_operator(name));
+            if intrinsic.is_none() && !name.starts_with("__") {
                 for argument in arguments {
                     row_expression_type(argument, scope)?;
                 }
                 return Ok(Type::Any);
             }
-            let direction_key = matches!(name.as_str(), "__asc" | "__desc");
+            let direction_key = matches!(intrinsic, Some(Intrinsic::Asc | Intrinsic::Desc));
             if arguments.len() != 2 && !(direction_key && arguments.len() == 1) {
                 return Err(TypeError::new(format!(
                     "primitive '{name}' cannot be used in a SQL predicate"
                 )));
             }
-            match name.as_str() {
-                "__asc" | "__desc" => {
+            match intrinsic {
+                Some(Intrinsic::Asc | Intrinsic::Desc) => {
                     let value_ty = row_expression_type(arguments[0], scope)?;
                     if !is_orderable_type(&value_ty) {
                         return Err(TypeError::new(format!(
@@ -304,7 +313,7 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     }
                     Ok(Type::Direction)
                 }
-                "__eq" | "__ne" | "__lt" | "__le" | "__gt" | "__ge" => {
+                Some(Intrinsic::Eq | Intrinsic::Ne | Intrinsic::Lt | Intrinsic::Le | Intrinsic::Gt | Intrinsic::Ge) => {
                     let left_ty = row_expression_type(arguments[0], scope)?;
                     let right_ty = row_expression_type(arguments[1], scope)?;
                     if !compare_operand_compatible(&left_ty, &right_ty) {
@@ -314,7 +323,7 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     }
                     Ok(Type::Bool)
                 }
-                "__and" | "__or" => {
+                Some(Intrinsic::And | Intrinsic::Or) => {
                     for ty in [
                         row_expression_type(arguments[0], scope)?,
                         row_expression_type(arguments[1], scope)?,
@@ -327,7 +336,7 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     }
                     Ok(Type::Bool)
                 }
-                "__add" | "__sub" | "__mul" | "__div" | "__mod" => {
+                Some(Intrinsic::Add | Intrinsic::Sub | Intrinsic::Mul | Intrinsic::Div | Intrinsic::Mod) => {
                     for ty in [
                         row_expression_type(arguments[0], scope)?,
                         row_expression_type(arguments[1], scope)?,

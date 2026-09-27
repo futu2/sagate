@@ -2,11 +2,11 @@ fn primitive_head(
     expr: &Expr,
     definitions: &HashMap<String, Expr>,
     seen: &mut Vec<String>,
-) -> Option<String> {
+) -> Option<Intrinsic> {
     match expr {
         Expr::Var(name) => {
-            if name.starts_with("__") {
-                return Some(name.clone());
+            if let Some(intrinsic) = Intrinsic::from_name(name) {
+                return Some(intrinsic);
             }
             if seen.contains(name) {
                 return None;
@@ -24,7 +24,7 @@ fn primitive_head(
             let mut primitive = None;
             for case in cases {
                 let current = primitive_head(&case.expr, definitions, seen)?;
-                if primitive.as_deref().is_some_and(|known| known != current) {
+                if primitive.is_some_and(|known| known != current) {
                     return None;
                 }
                 primitive = Some(current);
@@ -48,8 +48,8 @@ fn resolve_prelude_operations(
         }
         Expr::Var(name) if is_infix_operator(name) => {
             let primitive = primitive_head(&Expr::Var(name.clone()), definitions, &mut Vec::new());
-            if primitive.as_deref().is_some_and(is_scalar_primitive) {
-                *name = primitive.unwrap();
+            if primitive.is_some_and(Intrinsic::is_scalar) {
+                *name = primitive.unwrap().name().to_owned();
             }
         }
         Expr::RowLiteral(fields) => {
@@ -108,4 +108,3 @@ pub fn parse(source: &str) -> Result<Program, String> {
     }
     Ok(program)
 }
-

@@ -4,19 +4,19 @@
 
 # Relational backend primitives. Their implementations construct query ASTs;
 # scalar SQL expressions below are templates defined in Sagate.
-__table : string -> string -> any;
-__where : any -> any -> any;
-__select : any -> any -> any;
-__mapKey : any -> any -> any;
-__mapValue : any -> any -> any;
-__merge : any -> any -> any;
-__agg : any -> any -> any;
-__joinInner : any -> any -> any;
-__joinLeft : any -> any -> any;
-__joinRight : any -> any -> any;
-__joinFull : any -> any -> any;
-__order : any -> any -> any;
-__limit : any -> any -> any;
+__table : string -> string -> query r;
+__where : (row r -> bool) -> query r -> query r;
+__select : (row r -> row s) -> query r -> query s;
+__mapKey : keymapper m -> query r -> query (mapkey m r);
+__mapValue : valuemapper m -> query r -> query (mapvalue m r);
+__merge : query r -> query s -> query (merge r s);
+__agg : (row r -> row s) -> query r -> query s;
+__joinInner : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
+__joinLeft : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
+__joinRight : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
+__joinFull : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
+__order : (row r -> list direction) -> query r -> query r;
+__limit : int -> query r -> query r;
 __asc : a -> direction;
 __desc : a -> direction;
 __snake : keymapper;
@@ -82,47 +82,47 @@ length : string -> int = sql "LENGTH($1)"
 
 table : string -> string -> query r = schemaName => tableName => __table schemaName tableName
 
-_+_ : int -> int -> int = left => right => __add left right
-_+_ : float -> float -> float = left => right => __add left right
-_-_ : int -> int -> int = left => right => __sub left right
-_-_ : float -> float -> float = left => right => __sub left right
-_*_ : int -> int -> int = left => right => __mul left right
-_/_ : float -> float -> float = left => right => __div left right
-_%_ : int -> int -> int = left => right => __mod left right
-_==_ : int -> int -> bool = left => right => __eq left right
-_==_ : float -> float -> bool = left => right => __eq left right
-_==_ : string -> string -> bool = left => right => __eq left right
-_==_ : bool -> bool -> bool = left => right => __eq left right
-_==_ : date -> date -> bool = left => right => __eq left right
-_==_ : timestamp -> timestamp -> bool = left => right => __eq left right
-_!=_ : int -> int -> bool = left => right => __ne left right
-_!=_ : float -> float -> bool = left => right => __ne left right
-_!=_ : string -> string -> bool = left => right => __ne left right
-_!=_ : bool -> bool -> bool = left => right => __ne left right
-_!=_ : date -> date -> bool = left => right => __ne left right
-_!=_ : timestamp -> timestamp -> bool = left => right => __ne left right
-_<_ : int -> int -> bool = left => right => __lt left right
-_<_ : float -> float -> bool = left => right => __lt left right
-_<_ : string -> string -> bool = left => right => __lt left right
-_<_ : date -> date -> bool = left => right => __lt left right
-_<_ : timestamp -> timestamp -> bool = left => right => __lt left right
-_<=_ : int -> int -> bool = left => right => __le left right
-_<=_ : float -> float -> bool = left => right => __le left right
-_<=_ : string -> string -> bool = left => right => __le left right
-_<=_ : date -> date -> bool = left => right => __le left right
-_<=_ : timestamp -> timestamp -> bool = left => right => __le left right
-_>_ : int -> int -> bool = left => right => __gt left right
-_>_ : float -> float -> bool = left => right => __gt left right
-_>_ : string -> string -> bool = left => right => __gt left right
-_>_ : date -> date -> bool = left => right => __gt left right
-_>_ : timestamp -> timestamp -> bool = left => right => __gt left right
-_>=_ : int -> int -> bool = left => right => __ge left right
-_>=_ : float -> float -> bool = left => right => __ge left right
-_>=_ : string -> string -> bool = left => right => __ge left right
-_>=_ : date -> date -> bool = left => right => __ge left right
-_>=_ : timestamp -> timestamp -> bool = left => right => __ge left right
-_&&_ : bool -> bool -> bool = left => right => __and left right
-_||_ : bool -> bool -> bool = left => right => __or left right
+_+_ : int -> int -> int = sql "$1 + $2"
+_+_ : float -> float -> float = sql "$1 + $2"
+_-_ : int -> int -> int = sql "$1 - $2"
+_-_ : float -> float -> float = sql "$1 - $2"
+_*_ : int -> int -> int = sql "$1 * $2"
+_/_ : float -> float -> float = sql "$1 / $2"
+_%_ : int -> int -> int = sql "$1 % $2"
+_==_ : int -> int -> bool = sql "$1 = $2"
+_==_ : float -> float -> bool = sql "$1 = $2"
+_==_ : string -> string -> bool = sql "$1 = $2"
+_==_ : bool -> bool -> bool = sql "$1 = $2"
+_==_ : date -> date -> bool = sql "$1 = $2"
+_==_ : timestamp -> timestamp -> bool = sql "$1 = $2"
+_!=_ : int -> int -> bool = sql "$1 <> $2"
+_!=_ : float -> float -> bool = sql "$1 <> $2"
+_!=_ : string -> string -> bool = sql "$1 <> $2"
+_!=_ : bool -> bool -> bool = sql "$1 <> $2"
+_!=_ : date -> date -> bool = sql "$1 <> $2"
+_!=_ : timestamp -> timestamp -> bool = sql "$1 <> $2"
+_<_ : int -> int -> bool = sql "$1 < $2"
+_<_ : float -> float -> bool = sql "$1 < $2"
+_<_ : string -> string -> bool = sql "$1 < $2"
+_<_ : date -> date -> bool = sql "$1 < $2"
+_<_ : timestamp -> timestamp -> bool = sql "$1 < $2"
+_<=_ : int -> int -> bool = sql "$1 <= $2"
+_<=_ : float -> float -> bool = sql "$1 <= $2"
+_<=_ : string -> string -> bool = sql "$1 <= $2"
+_<=_ : date -> date -> bool = sql "$1 <= $2"
+_<=_ : timestamp -> timestamp -> bool = sql "$1 <= $2"
+_>_ : int -> int -> bool = sql "$1 > $2"
+_>_ : float -> float -> bool = sql "$1 > $2"
+_>_ : string -> string -> bool = sql "$1 > $2"
+_>_ : date -> date -> bool = sql "$1 > $2"
+_>_ : timestamp -> timestamp -> bool = sql "$1 > $2"
+_>=_ : int -> int -> bool = sql "$1 >= $2"
+_>=_ : float -> float -> bool = sql "$1 >= $2"
+_>=_ : string -> string -> bool = sql "$1 >= $2"
+_>=_ : date -> date -> bool = sql "$1 >= $2"
+_>=_ : timestamp -> timestamp -> bool = sql "$1 >= $2"
+_&&_ : bool -> bool -> bool = sql "$1 AND $2"
+_||_ : bool -> bool -> bool = sql "$1 OR $2"
 
 _&_ = value => function => function value
 _$_ = function => value => function value
