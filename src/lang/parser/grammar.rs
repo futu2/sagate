@@ -395,13 +395,28 @@ impl Parser {
             name,
             annotation,
             expr,
+            foreign: None,
         })
     }
 
     fn parse_definition(&mut self) -> Result<Binding, String> {
+        let foreign_marker = self.try_parse_foreign_marker()?;
         let name = self.parse_binding_name()?;
         let annotation = if self.eat_symbol(":") {
             Some(self.parse_type()?)
+        } else {
+            None
+        };
+        // The foreign operation a declaration carries: either spelled with
+        // the explicit `foreign` marker, or implied by the double-underscore
+        // spelling the embedded core prelude still uses. The id must name a
+        // backend operation, so unknown primitives are rejected here.
+        let foreign = if foreign_marker || name.starts_with("__") {
+            let written = name.strip_prefix("__").unwrap_or(&name);
+            let Some(id) = ForeignId::from_decl_name(written) else {
+                return self.error(format!("unknown primitive '{name}'"));
+            };
+            Some(id)
         } else {
             None
         };
@@ -412,6 +427,7 @@ impl Parser {
                 name: name.clone(),
                 annotation,
                 expr: Expr::Var(name),
+                foreign,
             });
         }
         self.expect_symbol("=")?;
@@ -421,7 +437,34 @@ impl Parser {
             name,
             annotation,
             expr,
+            foreign,
         })
+    }
+
+    /// Recognize the `foreign <backend> <name> :` declaration prefix without
+    /// consuming unless the full shape matches, so a binding named `foreign`
+    /// still parses as an ordinary definition.
+    fn try_parse_foreign_marker(&mut self) -> Result<bool, String> {
+        let matches_marker = matches!(
+            (
+                self.tokens.get(self.index).map(|token| &token.kind),
+                self.tokens.get(self.index + 1).map(|token| &token.kind),
+                self.tokens.get(self.index + 2).map(|token| &token.kind),
+                self.tokens.get(self.index + 3).map(|token| &token.kind),
+            ),
+            (
+                Some(TokenKind::Ident(keyword)),
+                Some(TokenKind::Ident(backend)),
+                Some(TokenKind::Ident(_)),
+                Some(TokenKind::Symbol(colon)),
+            ) if keyword == "foreign" && backend == "sql" && colon == ":"
+        );
+        if !matches_marker {
+            return Ok(false);
+        }
+        self.bump(); // `foreign`
+        self.bump(); // backend
+        Ok(true)
     }
 
     fn parse_binding_name(&mut self) -> Result<String, String> {

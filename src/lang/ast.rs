@@ -55,6 +55,10 @@ pub struct Binding {
     pub name: String,
     pub annotation: Option<Type>,
     pub expr: Expr,
+    /// The backend operation this declaration lowers to, when the binding is
+    /// a foreign declaration. Ordinary definitions stay `None`: the checker
+    /// and the SQL backend then treat them as plain Sagate functions.
+    pub foreign: Option<super::relational::ForeignId>,
 }
 
 /// The core language is deliberately small: values are variables, lambdas,
@@ -285,7 +289,7 @@ pub enum Kind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum MapperAxis {
+pub(crate) enum MapperAxis {
     Key,
     Value,
 }

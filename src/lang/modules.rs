@@ -13,9 +13,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::ast::*;
-use super::parser::{
-    is_infix_operator, parse_module, prelude_source_name, resolved_prelude_bindings,
-};
+use super::parser::{parse_module, prelude_source_name, resolved_prelude_bindings};
 
 /// One SQL output of a compilation: the internal binding symbol together with
 /// the source-facing name the result is reported under.
@@ -360,17 +358,6 @@ impl Loader {
             }
             module_bindings.extend(resolved);
 
-            // Structural scalar operators resolve against the module's own
-            // flat table, exactly as single-file parsing does.
-            let table: HashMap<String, Expr> = module_bindings
-                .iter()
-                .map(|binding| (binding.name.clone(), binding.expr.clone()))
-                .collect();
-            for binding in &mut module_bindings {
-                if let Some(rewritten) = resolve_operator_primitives(&binding.expr, &table) {
-                    binding.expr = rewritten;
-                }
-            }
             flattened.push(module_bindings);
         }
 
@@ -618,60 +605,6 @@ pub(super) fn resolve_free_names(
         // Literals, SQL templates, and field markers carry no names.
         other => Ok(other.clone()),
     }
-}
-
-/// Resolve scalar operator spellings to their structural primitives when a
-/// module's own definitions bottom out at one. Returns `None` when the
-/// expression has no operator references to rewrite.
-fn resolve_operator_primitives(expr: &Expr, definitions: &HashMap<String, Expr>) -> Option<Expr> {
-    let mut cloned = expr.clone();
-    let changed = rewrite_operators(&mut cloned, definitions);
-    changed.then_some(cloned)
-}
-
-fn rewrite_operators(expr: &mut Expr, definitions: &HashMap<String, Expr>) -> bool {
-    let mut changed = false;
-    match expr {
-        Expr::Var(name) if is_infix_operator(name) && !definitions.contains_key(name) => {
-            if let Some(primitive) =
-                super::parser::primitive_head_of(&Expr::Var(name.clone()), definitions)
-            {
-                if primitive.is_scalar() {
-                    *name = primitive.name().to_owned();
-                    changed = true;
-                }
-            }
-        }
-        Expr::Var(name) if name.starts_with("__") && !definitions.contains_key(name) => {
-            // Unknown primitives are reported by name resolution; leave the
-            // reference in place for the checker's own message.
-        }
-        Expr::RowLiteral(fields) => {
-            for (_, value) in fields {
-                changed |= rewrite_operators(value, definitions);
-            }
-        }
-        Expr::Apply { function, argument } => {
-            changed |= rewrite_operators(function, definitions);
-            changed |= rewrite_operators(argument, definitions);
-        }
-        Expr::Lambda { body, .. }
-        | Expr::Annotated { expr: body, .. }
-        | Expr::Access { target: body, .. } => {
-            changed |= rewrite_operators(body, definitions);
-        }
-        Expr::Let { value, body, .. } => {
-            changed |= rewrite_operators(value, definitions);
-            changed |= rewrite_operators(body, definitions);
-        }
-        Expr::Overloaded(cases) => {
-            for case in cases {
-                changed |= rewrite_operators(&mut case.expr, definitions);
-            }
-        }
-        _ => {}
-    }
-    changed
 }
 
 fn prefix_parse_error(file: &str, error: String) -> String {

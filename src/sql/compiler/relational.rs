@@ -276,7 +276,7 @@ fn compile_join(
     left: Relation,
     right: Relation,
     condition: SqlExpr,
-    kind: Intrinsic,
+    kind: ForeignId,
     counter: &mut u32,
 ) -> Result<Relation, CompileError> {
     let row = crate::lang::join_row(&left.row, &right.row, kind);
@@ -312,9 +312,9 @@ fn compile_join(
             .collect()
     };
     let join_type = match kind {
-        Intrinsic::JoinLeft => JoinType::Left,
-        Intrinsic::JoinRight => JoinType::Right,
-        Intrinsic::JoinFull => JoinType::Full,
+        ForeignId::JoinLeft => JoinType::Left,
+        ForeignId::JoinRight => JoinType::Right,
+        ForeignId::JoinFull => JoinType::Full,
         _ => JoinType::Inner,
     };
     let Relation {

@@ -1,78 +1,10 @@
-# Public language functions and SQL expression templates.
-# Repeated operator definitions are an explicit finite overload set. Numeric
-# operations intentionally keep int and float signatures separate.
-
-# Relational backend primitives. Their implementations construct query ASTs;
-# scalar SQL expressions below are templates defined in Sagate.
-__table : string -> string -> query r;
-__where : (row r -> bool) -> query r -> query r;
-__select : (row r -> row s) -> query r -> query s;
-__mapKey : keymapper m -> query r -> query (mapkey m r);
-__mapValue : valuemapper m -> query r -> query (mapvalue m r);
-__merge : query r -> query s -> query (merge r s);
-__agg : (row r -> row s) -> query r -> query s;
-__joinInner : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
-__joinLeft : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
-__joinRight : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
-__joinFull : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
-__order : (row r -> list direction) -> query r -> query r;
-__limit : int -> query r -> query r;
-__asc : a -> direction;
-__desc : a -> direction;
-__snake : keymapper;
-__kebab : keymapper;
-__camel : keymapper;
-__prefix : string -> keymapper;
-__suffix : string -> keymapper;
-__maybe : valuemapper;
-__list : valuemapper;
-__add : int -> int -> int = sql "$1 + $2";
-__add : float -> float -> float = sql "$1 + $2";
-__sub : int -> int -> int = sql "$1 - $2";
-__sub : float -> float -> float = sql "$1 - $2";
-__mul : int -> int -> int = sql "$1 * $2";
-__div : float -> float -> float = sql "$1 / $2";
-__mod : int -> int -> int = sql "$1 % $2";
-__eq : int -> int -> bool = sql "$1 = $2";
-__eq : float -> float -> bool = sql "$1 = $2";
-__eq : string -> string -> bool = sql "$1 = $2";
-__eq : bool -> bool -> bool = sql "$1 = $2";
-__eq : date -> date -> bool = sql "$1 = $2";
-__eq : timestamp -> timestamp -> bool = sql "$1 = $2";
-__ne : int -> int -> bool = sql "$1 <> $2";
-__ne : float -> float -> bool = sql "$1 <> $2";
-__ne : string -> string -> bool = sql "$1 <> $2";
-__ne : bool -> bool -> bool = sql "$1 <> $2";
-__ne : date -> date -> bool = sql "$1 <> $2";
-__ne : timestamp -> timestamp -> bool = sql "$1 <> $2";
-__lt : int -> int -> bool = sql "$1 < $2";
-__lt : float -> float -> bool = sql "$1 < $2";
-__lt : string -> string -> bool = sql "$1 < $2";
-__lt : date -> date -> bool = sql "$1 < $2";
-__lt : timestamp -> timestamp -> bool = sql "$1 < $2";
-__le : int -> int -> bool = sql "$1 <= $2";
-__le : float -> float -> bool = sql "$1 <= $2";
-__le : string -> string -> bool = sql "$1 <= $2";
-__le : date -> date -> bool = sql "$1 <= $2";
-__le : timestamp -> timestamp -> bool = sql "$1 <= $2";
-__gt : int -> int -> bool = sql "$1 > $2";
-__gt : float -> float -> bool = sql "$1 > $2";
-__gt : string -> string -> bool = sql "$1 > $2";
-__gt : date -> date -> bool = sql "$1 > $2";
-__gt : timestamp -> timestamp -> bool = sql "$1 > $2";
-__ge : int -> int -> bool = sql "$1 >= $2";
-__ge : float -> float -> bool = sql "$1 >= $2";
-__ge : string -> string -> bool = sql "$1 >= $2";
-__ge : date -> date -> bool = sql "$1 >= $2";
-__ge : timestamp -> timestamp -> bool = sql "$1 >= $2";
-__and : bool -> bool -> bool = sql "$1 AND $2";
-__or : bool -> bool -> bool = sql "$1 OR $2";
-__count : a -> agg int = sql "COUNT($1)";
-__sum : a -> agg a = sql "SUM($1)";
-__avg : a -> agg float = sql "AVG($1)";
-__min : a -> agg a = sql "MIN($1)";
-__max : a -> agg a = sql "MAX($1)";
-__group : a -> group a;
+# Standard library prelude: the public language surface.
+#
+# Every relational operation is an ordinary Sagate definition over the core
+# prelude's foreign declarations, so user code can alias, partially apply,
+# or override them like any other function. Scalar operators are overloaded
+# SQL template functions; numeric operations intentionally keep int and
+# float signatures separate.
 
 # SQL functions use positional `$1`, `$2`, ... argument placeholders. Their
 # expression syntax is parsed into SQL ASTs and rendered for the selected dialect.

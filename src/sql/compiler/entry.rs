@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use crate::lang::{
-    flatten_apply, substitute, type_check, AggregateField, AggregateOp, Column, Expr, Intrinsic,
-    Literal, Mapper, OutputBinding, Program, Row,
+    aggregate_row_fields, flatten_apply, foreign_declarations, mapper_of, row_literal_fields,
+    substitute, type_check, AggregateField, AggregateOp, Column, Expr, ForeignId, ForeignOps,
+    Literal, Mapper, MapperAxis, OutputBinding, Program, Row,
 };
 
 use super::model::{CompileError, CompiledQuery, Relation};
@@ -25,6 +26,7 @@ pub(crate) fn compile_with_dialect(
         .iter()
         .map(|binding| (binding.name.clone(), &binding.expr))
         .collect();
+    let foreign = foreign_declarations(&program.bindings);
     // CTE names are numbered from one shared counter, so every step in a
     // pipeline (and across pipelines) lifts its input under a fresh name.
     let mut counter = 0u32;
@@ -36,6 +38,7 @@ pub(crate) fn compile_with_dialect(
                 &definitions,
                 &HashMap::new(),
                 &known_rows,
+                &foreign,
                 &mut counter,
             )?;
             relation.row = row.clone();
@@ -71,6 +74,7 @@ pub(crate) fn compile_linked_with_dialect(
         .iter()
         .map(|binding| (binding.name.clone(), &binding.expr))
         .collect();
+    let foreign = foreign_declarations(&program.bindings);
     let mut counter = 0u32;
     let mut result = Vec::with_capacity(linked.outputs.len());
     for output in &linked.outputs {
@@ -89,6 +93,7 @@ pub(crate) fn compile_linked_with_dialect(
             &definitions,
             &HashMap::new(),
             &known_rows,
+            &foreign,
             &mut counter,
         )?;
         relation.row = row.clone();
@@ -131,21 +136,22 @@ fn compile_expr(
     definitions: &HashMap<String, &Expr>,
     locals: &HashMap<String, Relation>,
     known_rows: &HashMap<String, Row>,
+    foreign: &ForeignOps,
     counter: &mut u32,
 ) -> Result<Relation, String> {
     match expr {
         Expr::Apply { .. } => {
-            compile_application(expr, definitions, locals, known_rows, counter)
+            compile_application(expr, definitions, locals, known_rows, foreign, counter)
         }
         Expr::Let { name, value, body } => {
             // Let is beta-reduced at this boundary. This supports both
             // relation bindings and local function values without introducing
             // an imperative runtime environment into SQL lowering.
             let reduced = substitute(body, name, value);
-            compile_expr(&reduced, definitions, locals, known_rows, counter)
+            compile_expr(&reduced, definitions, locals, known_rows, foreign, counter)
         }
         Expr::Annotated { expr, .. } => {
-            compile_expr(expr, definitions, locals, known_rows, counter)
+            compile_expr(expr, definitions, locals, known_rows, foreign, counter)
         }
         Expr::Var(name) => {
             if let Some(value) = locals.get(name) {
@@ -154,7 +160,14 @@ fn compile_expr(
             let value = definitions
                 .get(name)
                 .ok_or_else(|| format!("unknown variable '{name}'"))?;
-            let mut relation = compile_expr(value, definitions, locals, known_rows, counter)?;
+            let mut relation = compile_expr(
+                value,
+                definitions,
+                locals,
+                known_rows,
+                foreign,
+                counter,
+            )?;
             if let Some(row) = known_rows.get(name) {
                 relation.row = row.clone();
             }
@@ -176,6 +189,7 @@ fn compile_application(
     definitions: &HashMap<String, &Expr>,
     locals: &HashMap<String, Relation>,
     known_rows: &HashMap<String, Row>,
+    foreign: &ForeignOps,
     counter: &mut u32,
 ) -> Result<Relation, String> {
     let (head, arguments) = flatten_apply(expr);
@@ -189,7 +203,7 @@ fn compile_application(
                     argument: Box::new((*argument).clone()),
                 };
             }
-            match compile_expr(&expanded, definitions, locals, known_rows, counter) {
+            match compile_expr(&expanded, definitions, locals, known_rows, foreign, counter) {
                 Ok(relation) => return Ok(relation),
                 Err(error) => last_error = Some(error),
             }
@@ -214,13 +228,16 @@ fn compile_application(
                 },
             };
         }
-        return compile_expr(&reduced, definitions, locals, known_rows, counter);
+        return compile_expr(&reduced, definitions, locals, known_rows, foreign, counter);
     }
     let Expr::Var(name) = head else {
         return Err("only prelude functions can produce SQL relations".to_owned());
     };
-    match Intrinsic::from_name(name) {
-        Some(Intrinsic::Table) => {
+    // Dispatch on the declared foreign operation, not on names: wrappers,
+    // aliases, and overrides reach their lowering through the declaration's
+    // id.
+    match foreign.get(name).copied() {
+        Some(ForeignId::Table) => {
             if arguments.len() != 2 {
                 return Err("table expects a schema name and table name".to_owned());
             }
@@ -232,86 +249,88 @@ fn compile_application(
             };
             compile_table_path(schema, table)
         }
-        Some(Intrinsic::Where) => {
+        Some(ForeignId::Where) => {
             if arguments.len() != 2 {
                 return Err("where expects a predicate and a relation".to_owned());
             }
             let inner =
-                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+                compile_expr(arguments[1], definitions, locals, known_rows, foreign, counter)?;
             let condition = where_condition(arguments[0], &inner.row, definitions)
                 .map_err(|error| error.to_string())?;
             compile_where(inner, condition, counter).map_err(|error| error.to_string())
         }
-        Some(Intrinsic::Select) => {
+        Some(ForeignId::Select) => {
             if arguments.len() != 2 {
                 return Err("select expects a projection and a relation".to_owned());
             }
             let inner =
-                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
-            let (param, fields) = projection_value(arguments[0])?;
+                compile_expr(arguments[1], definitions, locals, known_rows, foreign, counter)?;
+            let Some((param, fields)) = projection_fields(arguments[0]) else {
+                return Err("select expects a row projection".to_owned());
+            };
             compile_select(inner, param, fields, definitions, counter)
                 .map_err(|error| error.to_string())
         }
-        Some(Intrinsic::MapKey) => {
+        Some(ForeignId::MapKey) => {
             if arguments.len() != 2 {
                 return Err("mapKey expects a mapper and a relation".to_owned());
             }
             let inner =
-                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
-            let mapper = mapper_value(arguments[0], true, definitions)?;
+                compile_expr(arguments[1], definitions, locals, known_rows, foreign, counter)?;
+            let mapper = mapper_value(arguments[0], true, definitions, foreign)?;
             compile_map_key(inner, &mapper, counter).map_err(|error| error.to_string())
         }
-        Some(Intrinsic::MapValue) => {
+        Some(ForeignId::MapValue) => {
             if arguments.len() != 2 {
                 return Err("mapValue expects a mapper and a relation".to_owned());
             }
             let inner =
-                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
-            let mapper = mapper_value(arguments[0], false, definitions)?;
+                compile_expr(arguments[1], definitions, locals, known_rows, foreign, counter)?;
+            let mapper = mapper_value(arguments[0], false, definitions, foreign)?;
             compile_map_value(inner, &mapper, counter).map_err(|error| error.to_string())
         }
-        Some(Intrinsic::Aggregate) => {
+        Some(ForeignId::Aggregate) => {
             if arguments.len() != 2 {
                 return Err("agg expects a projection and a relation".to_owned());
             }
             let inner =
-                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
-            let fields = aggregate_projection(arguments[0], definitions)?;
+                compile_expr(arguments[1], definitions, locals, known_rows, foreign, counter)?;
+            let fields = aggregate_projection(arguments[0], definitions, foreign)?;
             compile_aggregate(inner, &fields, definitions, counter)
                 .map_err(|error| error.to_string())
         }
-        Some(intrinsic) if intrinsic.is_join() => {
+        Some(op) if op.is_join() => {
             if arguments.len() != 3 {
                 return Err("join expects a right query, predicate, and left query".to_owned());
             }
             let right =
-                compile_expr(arguments[0], definitions, locals, known_rows, counter)?;
+                compile_expr(arguments[0], definitions, locals, known_rows, foreign, counter)?;
             let left =
-                compile_expr(arguments[2], definitions, locals, known_rows, counter)?;
+                compile_expr(arguments[2], definitions, locals, known_rows, foreign, counter)?;
             let condition = join_condition(arguments[1], &left.row, &right.row, definitions)
                 .map_err(|error| error.to_string())?;
-            compile_join(left, right, condition, intrinsic, counter).map_err(|error| error.to_string())
+            compile_join(left, right, condition, op, counter).map_err(|error| error.to_string())
         }
-        Some(Intrinsic::Merge) => {
+        Some(ForeignId::Merge) => {
             if arguments.len() != 2 {
                 return Err("merge expects two relations".to_owned());
             }
             let left =
-                compile_expr(arguments[0], definitions, locals, known_rows, counter)?;
+                compile_expr(arguments[0], definitions, locals, known_rows, foreign, counter)?;
             let right =
-                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+                compile_expr(arguments[1], definitions, locals, known_rows, foreign, counter)?;
             compile_merge(left, right, counter).map_err(|error| error.to_string())
         }
-        Some(Intrinsic::Order) => {
+        Some(ForeignId::Order) => {
             if arguments.len() != 2 {
                 return Err("order expects sort keys and a relation".to_owned());
             }
             let inner =
-                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
-            let items = order_by_items(arguments[0], &inner.row, definitions)?;
+                compile_expr(arguments[1], definitions, locals, known_rows, foreign, counter)?;
+            let items = order_by_items(arguments[0], &inner.row, definitions, foreign)?;
             compile_order(inner, items, counter).map_err(|error| error.to_string())
         }
-        Some(Intrinsic::Limit) => {
+        Some(ForeignId::Limit) => {
             if arguments.len() != 2 {
                 return Err("limit expects a count and a relation".to_owned());
             }
@@ -328,7 +347,7 @@ fn compile_application(
                 return Err("limit expects a non-negative integer".to_owned());
             }
             let inner =
-                compile_expr(arguments[1], definitions, locals, known_rows, counter)?;
+                compile_expr(arguments[1], definitions, locals, known_rows, foreign, counter)?;
             compile_limit(inner, *count, counter).map_err(|error| error.to_string())
         }
         _ => {
@@ -336,7 +355,7 @@ fn compile_application(
                 .get(name)
                 .ok_or_else(|| format!("unknown function '{name}'"))?;
             // A binding can hold a partially applied prelude function. Inline
-            // it at the call site, then the normal prelude branch handles the
+            // it at the call site, then the foreign branch handles the
             // completed application.
             let mut expanded = (*definition).clone();
             for argument in arguments {
@@ -345,7 +364,7 @@ fn compile_application(
                     argument: Box::new(argument.clone()),
                 };
             }
-            compile_expr(&expanded, definitions, locals, known_rows, counter)
+            compile_expr(&expanded, definitions, locals, known_rows, foreign, counter)
         }
     }
 }

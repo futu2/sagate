@@ -9,6 +9,7 @@ struct Definition {
 // ---------- HM-shaped type checking -------------------------------------
 
 pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> {
+    let foreign = foreign_declarations(&program.bindings);
     let mut environment = HashMap::<String, Type>::new();
     let mut definitions = HashMap::<String, Definition>::new();
     let mut query_rows = HashMap::new();
@@ -25,9 +26,9 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> 
                     .at_definition(&binding.name, "kind checking")
             })?;
         }
-        let expanded = expand_aliases(&binding.expr, &definitions, &environment);
+        let expanded = expand_aliases(&binding.expr, &definitions, &environment, &foreign);
         if let Some(annotation) = &binding.annotation {
-            check_expr_against(&binding.expr, annotation, &environment).map_err(
+            check_expr_against(&binding.expr, annotation, &environment, &foreign).map_err(
                 |error| error.at_definition(&binding.name, "signature"),
             )?;
         }
@@ -35,12 +36,12 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Row>, TypeError> 
             if annotation_is_row_polymorphic(annotation) {
                 annotation.clone()
             } else {
-                infer_expr(&expanded, &environment).map_err(|error| {
+                infer_expr(&expanded, &environment, &foreign).map_err(|error| {
                     error.at_definition(&binding.name, "inference")
                 })?
             }
         } else {
-            infer_expr(&expanded, &environment).map_err(|error| {
+            infer_expr(&expanded, &environment, &foreign).map_err(|error| {
                 error.at_definition(&binding.name, "inference")
             })?
         };
@@ -211,22 +212,23 @@ fn check_expr_against(
     expr: &Expr,
     expected: &Type,
     environment: &HashMap<String, Type>,
+    foreign: &ForeignOps,
 ) -> Result<(), TypeError> {
     match (expr, expected) {
         (Expr::Lambda { param, body, .. }, Type::Function(argument, result)) => {
             let mut scoped = environment.clone();
             scoped.insert(param.clone(), (**argument).clone());
-            check_expr_against(body, result, &scoped)
+            check_expr_against(body, result, &scoped, foreign)
         }
         (Expr::Overloaded(cases), _) => {
             for case in cases {
                 let case_type = case.annotation.as_ref().unwrap_or(expected);
-                check_expr_against(&case.expr, case_type, environment)?;
+                check_expr_against(&case.expr, case_type, environment, foreign)?;
             }
             Ok(())
         }
         _ => {
-            let inferred = infer_expr(expr, environment)?;
+            let inferred = infer_expr(expr, environment, foreign)?;
             if type_compatible(&inferred, expected) {
                 Ok(())
             } else {
@@ -387,11 +389,13 @@ fn expand_aliases(
     expr: &Expr,
     definitions: &HashMap<String, Definition>,
     environment: &HashMap<String, Type>,
+    foreign: &ForeignOps,
 ) -> Expr {
     fn go(
         expr: &Expr,
         definitions: &HashMap<String, Definition>,
         environment: &HashMap<String, Type>,
+        foreign: &ForeignOps,
         stack: &mut Vec<String>,
         bound: &mut Vec<String>,
     ) -> Expr {
@@ -399,16 +403,24 @@ fn expand_aliases(
             Expr::Var(name)
                 if definitions.contains_key(name)
                     && !bound.contains(name)
-                    // Primitives are declared, not defined; their applications
-                    // are typed by dedicated rules, so never inline them.
-                    && !name.starts_with("__")
+                    // Foreign declarations are the backend call surface: their
+                    // applications are typed by the foreign rules, so never
+                    // inline them.
+                    && !foreign.contains_key(name)
                     && !is_sql_template_definition(&definitions[name].expr)
                     && !matches!(environment.get(name), Some(Type::Relation(_)))
                     && !stack.contains(name) =>
             {
                 stack.push(name.clone());
                 let definition = &definitions[name];
-                let expanded = go(&definition.expr, definitions, environment, stack, bound);
+                let expanded = go(
+                    &definition.expr,
+                    definitions,
+                    environment,
+                    foreign,
+                    stack,
+                    bound,
+                );
                 stack.pop();
                 match &definition.annotation {
                     Some(annotation) if !annotation_is_row_polymorphic(annotation) => {
@@ -424,8 +436,8 @@ fn expand_aliases(
                 }
             }
             Expr::Apply { function, argument } => Expr::Apply {
-                function: Box::new(go(function, definitions, environment, stack, bound)),
-                argument: Box::new(go(argument, definitions, environment, stack, bound)),
+                function: Box::new(go(function, definitions, environment, foreign, stack, bound)),
+                argument: Box::new(go(argument, definitions, environment, foreign, stack, bound)),
             },
             Expr::Lambda {
                 param,
@@ -436,15 +448,15 @@ fn expand_aliases(
                 let result = Expr::Lambda {
                     param: param.clone(),
                     annotation: annotation.clone(),
-                    body: Box::new(go(body, definitions, environment, stack, bound)),
+                    body: Box::new(go(body, definitions, environment, foreign, stack, bound)),
                 };
                 bound.pop();
                 result
             }
             Expr::Let { name, value, body } => {
-                let value = go(value, definitions, environment, stack, bound);
+                let value = go(value, definitions, environment, foreign, stack, bound);
                 bound.push(name.clone());
-                let body = go(body, definitions, environment, stack, bound);
+                let body = go(body, definitions, environment, foreign, stack, bound);
                 bound.pop();
                 Expr::Let {
                     name: name.clone(),
@@ -453,26 +465,31 @@ fn expand_aliases(
                 }
             }
             Expr::Annotated { expr, ty } => Expr::Annotated {
-                expr: Box::new(go(expr, definitions, environment, stack, bound)),
+                expr: Box::new(go(expr, definitions, environment, foreign, stack, bound)),
                 ty: ty.clone(),
             },
             Expr::Access { target, field } => Expr::Access {
-                target: Box::new(go(target, definitions, environment, stack, bound)),
+                target: Box::new(go(target, definitions, environment, foreign, stack, bound)),
                 field: field.clone(),
             },
             Expr::List(elements) => Expr::List(
                 elements
                     .iter()
-                    .map(|element| go(element, definitions, environment, stack, bound))
+                    .map(|element| go(element, definitions, environment, foreign, stack, bound))
                     .collect(),
             ),
             // Row literal values expand so that user-aliased aggregate
             // constructors (`countRows = count; agg {all_rows = countRows}`)
-            // reach their primitive heads for the relational rules.
+            // reach their foreign heads for the relational rules.
             Expr::RowLiteral(fields) => Expr::RowLiteral(
                 fields
                     .iter()
-                    .map(|(name, value)| (name.clone(), go(value, definitions, environment, stack, bound)))
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            go(value, definitions, environment, foreign, stack, bound),
+                        )
+                    })
                     .collect(),
             ),
             Expr::Overloaded(cases) => Expr::Overloaded(
@@ -480,7 +497,14 @@ fn expand_aliases(
                     .iter()
                     .map(|case| OverloadCase {
                         annotation: case.annotation.clone(),
-                        expr: Box::new(go(&case.expr, definitions, environment, stack, bound)),
+                        expr: Box::new(go(
+                            &case.expr,
+                            definitions,
+                            environment,
+                            foreign,
+                            stack,
+                            bound,
+                        )),
                     })
                     .collect(),
             ),
@@ -491,6 +515,7 @@ fn expand_aliases(
         expr,
         definitions,
         environment,
+        foreign,
         &mut Vec::new(),
         &mut Vec::new(),
     )

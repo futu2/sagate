@@ -76,6 +76,7 @@ pub(super) fn order_by_items(
     expr: &Expr,
     row: &Row,
     definitions: &HashMap<String, &Expr>,
+    foreign: &ForeignOps,
 ) -> Result<Vec<OrderByItem>, String> {
     match expr {
         Expr::Lambda { param, body, .. } => {
@@ -91,7 +92,7 @@ pub(super) fn order_by_items(
             };
             let mut items = Vec::with_capacity(elements.len());
             for element in elements {
-                let (ascending, value) = resolve_order_key(element, definitions)?;
+                let (ascending, value) = resolve_order_key(element, definitions, foreign)?;
                 let key = lower_row_expression(&value, &scope, definitions)?;
                 items.push(OrderByItem {
                     expr: key,
@@ -101,30 +102,31 @@ pub(super) fn order_by_items(
             }
             Ok(items)
         }
-        Expr::Annotated { expr, .. } => order_by_items(expr, row, definitions),
+        Expr::Annotated { expr, .. } => order_by_items(expr, row, definitions, foreign),
         Expr::Var(name) => {
             let definition = definitions
                 .get(name)
                 .ok_or_else(|| format!("unknown sort keys '{name}'"))?;
-            order_by_items(definition, row, definitions)
+            order_by_items(definition, row, definitions, foreign)
         }
         _ => Err("order expects sort keys".to_owned()),
     }
 }
 
 /// Reduce one list element to its direction and the key value it tags,
-/// chasing named wrappers such as `asc` down to their primitives.
+/// chasing named wrappers such as `asc` down to their foreign declarations.
 fn resolve_order_key(
     element: &Expr,
     definitions: &HashMap<String, &Expr>,
+    foreign: &ForeignOps,
 ) -> Result<(bool, Expr), String> {
     let (head, arguments) = flatten_apply(element);
     if let Expr::Var(name) = head {
-        match Intrinsic::from_name(name) {
-            Some(Intrinsic::Asc) if arguments.len() == 1 => {
+        match foreign.get(name).copied() {
+            Some(ForeignId::Asc) if arguments.len() == 1 => {
                 return Ok((true, arguments[0].clone()));
             }
-            Some(Intrinsic::Desc) if arguments.len() == 1 => {
+            Some(ForeignId::Desc) if arguments.len() == 1 => {
                 return Ok((false, arguments[0].clone()));
             }
             None => {
@@ -141,7 +143,7 @@ fn resolve_order_key(
                         argument: Box::new((*argument).clone()),
                     };
                 }
-                return resolve_order_key(&expanded, definitions);
+                return resolve_order_key(&expanded, definitions, foreign);
             }
             _ => {}
         }
@@ -155,7 +157,7 @@ fn resolve_order_key(
                     argument: Box::new((*argument).clone()),
                 };
             }
-            return resolve_order_key(&reduced, definitions);
+            return resolve_order_key(&reduced, definitions, foreign);
         }
     }
     Err("order keys must be asc or desc values".to_owned())

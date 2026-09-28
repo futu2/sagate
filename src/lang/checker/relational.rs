@@ -34,7 +34,12 @@ fn aggregate_row(input: &Row, fields: &[AggregateField]) -> Result<Row, TypeErro
     Ok(Row::new(output))
 }
 
-fn check_join_row_expression(expr: &Expr, left: &Row, right: &Row) -> Result<(), TypeError> {
+fn check_join_row_expression(
+    expr: &Expr,
+    left: &Row,
+    right: &Row,
+    foreign: &ForeignOps,
+) -> Result<(), TypeError> {
     let Expr::Lambda {
         param: left_param,
         body,
@@ -54,186 +59,63 @@ fn check_join_row_expression(expr: &Expr, left: &Row, right: &Row) -> Result<(),
     let mut scope = HashMap::new();
     scope.insert(left_param.as_str(), left);
     scope.insert(right_param.as_str(), right);
-    row_expression_type(body, &scope).map(|_| ())
-}
-
-fn mapper_value(expr: &Expr) -> Result<Mapper, TypeError> {
-    match expr {
-        Expr::Lambda { param, body, .. } if matches!(body.as_ref(), Expr::Var(name) if name == param) => {
-            Ok(Mapper::Identity)
-        }
-        Expr::Apply { .. } => {
-            let (head, arguments) = flatten_apply(expr);
-            if let Expr::Lambda { param, body, .. } = head {
-                let mut reduced = substitute(body, param, arguments[0]);
-                for argument in &arguments[1..] {
-                    reduced = Expr::Apply {
-                        function: Box::new(reduced),
-                        argument: Box::new((*argument).clone()),
-                    };
-                }
-                return mapper_value(&reduced);
-            }
-            match (head, arguments.as_slice()) {
-                (Expr::Var(name), [Expr::Literal(Literal::String(value))])
-                    if Intrinsic::from_name(name) == Some(Intrinsic::Prefix) =>
-                {
-                    Ok(Mapper::Prefix(value.clone()))
-                }
-                (Expr::Var(name), [Expr::Literal(Literal::String(value))])
-                    if Intrinsic::from_name(name) == Some(Intrinsic::Suffix) =>
-                {
-                    Ok(Mapper::Suffix(value.clone()))
-                }
-                _ => Err(TypeError::new("expected a mapper value")),
-            }
-        }
-        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Snake) => {
-            Ok(Mapper::Snake)
-        }
-        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Kebab) => {
-            Ok(Mapper::Kebab)
-        }
-        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Camel) => {
-            Ok(Mapper::Camel)
-        }
-        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::Maybe) => {
-            Ok(Mapper::Maybe)
-        }
-        Expr::Var(name) if Intrinsic::from_name(name) == Some(Intrinsic::List) => {
-            Ok(Mapper::List)
-        }
-        _ => Err(TypeError::new("expected a mapper value")),
-    }
-}
-
-/// Extract aggregate columns from an `agg` row literal: each value must be
-/// an aggregate constructor application (`group .user_id`, `sum .total`,
-/// `count`). Returns `None` when the expression is not a row literal.
-fn aggregate_fields(expr: &Expr) -> Option<Result<Vec<AggregateField>, TypeError>> {
-    let fields = match expr {
-        Expr::Lambda { body, .. } => match body.as_ref() {
-            Expr::RowLiteral(fields) => fields,
-            _ => return None,
-        },
-        Expr::RowLiteral(fields) => fields,
-        _ => return None,
-    };
-    let mut extracted = Vec::with_capacity(fields.len());
-    for (alias, value) in fields {
-        let extracted_field = match aggregate_key(value) {
-            Ok((operation, function, field)) => {
-                if field.is_none() && !matches!(operation, AggregateOp::Count) {
-                    return Some(Err(TypeError::new(format!(
-                        "aggregate '{alias}' expects a field reference"
-                    ))));
-                }
-                AggregateField {
-                    alias: alias.clone(),
-                    operation,
-                    function,
-                    field,
-                }
-            }
-            Err(error) => return Some(Err(error)),
-        };
-        extracted.push(extracted_field);
-    }
-    Some(Ok(extracted))
-}
-
-/// Match an aggregate constructor application. The user spellings are matched
-/// directly: row literals are opaque to alias expansion, so the prelude
-/// names survive to this point.
-fn aggregate_key(
-    value: &Expr,
-) -> Result<(AggregateOp, Option<String>, Option<String>), TypeError> {
-    let (head, arguments) = flatten_apply(value);
-    let head = match head {
-        Expr::Annotated { expr, .. } => expr.as_ref(),
-        other => other,
-    };
-    match head {
-        Expr::Var(name) => {
-            let operation = match Intrinsic::from_public_name(name) {
-                Some(Intrinsic::Group) => AggregateOp::Group,
-                Some(Intrinsic::Count) => AggregateOp::Count,
-                Some(Intrinsic::Sum) => AggregateOp::Sum,
-                Some(Intrinsic::Avg) => AggregateOp::Avg,
-                Some(Intrinsic::Min) => AggregateOp::Min,
-                Some(Intrinsic::Max) => AggregateOp::Max,
-                _ => {
-                    return Err(TypeError::new(format!(
-                        "unknown aggregate '{name}'"
-                    )))
-                }
-            };
-            let field = arguments.first().and_then(|argument| field_name_of(argument));
-            let function = (!matches!(operation, AggregateOp::Group)).then(|| name.clone());
-            Ok((operation, function, field))
-        }
-        // An aliased constructor expands to its wrapper lambda: reduce the
-        // application, or step into the body for a bare reference such as
-        // `countRows = count`.
-        Expr::Lambda { param, body, .. } => {
-            if let Some((first, rest)) = arguments.split_first() {
-                let mut reduced = substitute(body, param, first);
-                for argument in rest {
-                    reduced = Expr::Apply {
-                        function: Box::new(reduced),
-                        argument: Box::new((*argument).clone()),
-                    };
-                }
-                return aggregate_key(&reduced);
-            }
-            aggregate_key(body)
-        }
-        other => Err(TypeError::new(format!(
-            "agg expects an aggregate constructor, got {other:?}"
-        ))),
-    }
-}
-
-fn field_name_of(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Field(field) => Some(field.clone()),
-        Expr::Access { field, .. } => Some(field.clone()),
-        Expr::Lambda { body, .. } => field_name_of(body),
-        _ => None,
-    }
+    row_expression_type(body, &scope, foreign).map(|_| ())
 }
 
 /// Validate a where predicate: a single-row lambda over the relation row.
 /// Named predicates (a plain variable) are only validated by the SQL
 /// lowerer, which sees the definition.
-fn check_row_expression(expr: &Expr, row: &Row) -> Result<(), TypeError> {
+fn check_row_expression(expr: &Expr, row: &Row, foreign: &ForeignOps) -> Result<(), TypeError> {
     match expr {
         Expr::Lambda { param, body, .. } => {
             let mut scope = HashMap::new();
             scope.insert(param.as_str(), row);
-            row_expression_type(body, &scope).map(|_| ())
+            row_expression_type(body, &scope, foreign).map(|_| ())
         }
-        Expr::Annotated { expr, .. } => check_row_expression(expr, row),
+        Expr::Annotated { expr, .. } => check_row_expression(expr, row, foreign),
         _ => Ok(()),
+    }
+}
+
+/// Scalar operator spellings that can appear inside SQL predicates. The
+/// operators are ordinary overloaded template functions; this classification
+/// only drives operand validation until it moves into the backend pass.
+enum PredicateOperator {
+    Compare,
+    Logical,
+    Arithmetic,
+}
+
+fn predicate_operator(spelling: &str) -> Option<PredicateOperator> {
+    match spelling {
+        "==" | "!=" | "<" | "<=" | ">" | ">=" => Some(PredicateOperator::Compare),
+        "&&" | "||" => Some(PredicateOperator::Logical),
+        "+" | "-" | "*" | "/" | "%" => Some(PredicateOperator::Arithmetic),
+        _ => None,
     }
 }
 
 /// Type a scalar expression that SQL lowering will embed, against the row
 /// variables it references. Field references must exist in their row and
-/// comparison operands must be compatible.
-fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type, TypeError> {
+/// comparison operands must be compatible. Foreign operations are recognized
+/// by their declared id; scalar operators by their written spelling.
+fn row_expression_type(
+    expr: &Expr,
+    scope: &HashMap<&str, &Row>,
+    foreign: &ForeignOps,
+) -> Result<Type, TypeError> {
     match expr {
         Expr::Literal(literal) => Ok(literal_type(literal)),
-        Expr::Annotated { expr, .. } => row_expression_type(expr, scope),
+        Expr::Annotated { expr, .. } => row_expression_type(expr, scope, foreign),
         Expr::RowLiteral(fields) => {
             for (_, value) in fields {
-                row_expression_type(value, scope)?;
+                row_expression_type(value, scope, foreign)?;
             }
             Ok(Type::Any)
         }
         Expr::List(elements) => {
             for element in elements {
-                row_expression_type(element, scope)?;
+                row_expression_type(element, scope, foreign)?;
             }
             Ok(Type::Any)
         }
@@ -244,7 +126,7 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
             if let Some(&shadowed) = scope.get("row") {
                 scoped.insert(param.as_str(), shadowed);
             }
-            row_expression_type(body, &scoped)
+            row_expression_type(body, &scoped, foreign)
         }
         Expr::Access { target, field } => {
             let Expr::Var(param) = target.as_ref() else {
@@ -261,7 +143,7 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
         Expr::Apply { .. } => {
             let (head, arguments) = flatten_apply(expr);
             // Unwrap annotations, then beta-reduce applied lambdas so wrapper
-            // constructors such as `date "..."` reduce to their primitive head.
+            // constructors such as `date "..."` reduce to their foreign head.
             let head = match head {
                 Expr::Annotated { expr, .. } => expr.as_ref(),
                 head => head,
@@ -279,33 +161,38 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                         argument: Box::new((*argument).clone()),
                     };
                 }
-                return row_expression_type(&reduced, scope);
+                return row_expression_type(&reduced, scope, foreign);
             }
             let Expr::Var(name) = head else {
                 return Err(TypeError::new(
                     "expression cannot be used in a SQL predicate",
                 ));
             };
-            // Linked references to prelude bindings carry internal symbols;
-            // recognition runs on the written spelling the symbol came from.
+            let op = foreign.get(name).copied();
             let written = prelude_source_name(name);
-            let intrinsic =
-                Intrinsic::from_name(written).or_else(|| Intrinsic::from_operator(written));
-            if intrinsic.is_none() && !written.starts_with("__") {
+            let scalar = if op.is_none() {
+                predicate_operator(written)
+            } else {
+                None
+            };
+            // Linked references to user bindings carry internal symbols;
+            // anything that is neither a foreign operation nor a scalar
+            // operator lowers as an opaque value.
+            if op.is_none() && scalar.is_none() && !written.starts_with("__") {
                 for argument in arguments {
-                    row_expression_type(argument, scope)?;
+                    row_expression_type(argument, scope, foreign)?;
                 }
                 return Ok(Type::Any);
             }
-            let direction_key = matches!(intrinsic, Some(Intrinsic::Asc | Intrinsic::Desc));
+            let direction_key = matches!(op, Some(ForeignId::Asc | ForeignId::Desc));
             if arguments.len() != 2 && !(direction_key && arguments.len() == 1) {
                 return Err(TypeError::new(format!(
                     "primitive '{written}' cannot be used in a SQL predicate"
                 )));
             }
-            match intrinsic {
-                Some(Intrinsic::Asc | Intrinsic::Desc) => {
-                    let value_ty = row_expression_type(arguments[0], scope)?;
+            match (op, scalar) {
+                (Some(ForeignId::Asc | ForeignId::Desc), _) => {
+                    let value_ty = row_expression_type(arguments[0], scope, foreign)?;
                     if !is_orderable_type(&value_ty) {
                         return Err(TypeError::new(format!(
                             "order keys must be orderable values (int, float, string, bool, date, or timestamp), got {value_ty}"
@@ -313,9 +200,9 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     }
                     Ok(Type::Direction)
                 }
-                Some(Intrinsic::Eq | Intrinsic::Ne | Intrinsic::Lt | Intrinsic::Le | Intrinsic::Gt | Intrinsic::Ge) => {
-                    let left_ty = row_expression_type(arguments[0], scope)?;
-                    let right_ty = row_expression_type(arguments[1], scope)?;
+                (_, Some(PredicateOperator::Compare)) => {
+                    let left_ty = row_expression_type(arguments[0], scope, foreign)?;
+                    let right_ty = row_expression_type(arguments[1], scope, foreign)?;
                     if !compare_operand_compatible(&left_ty, &right_ty) {
                         return Err(TypeError::new(format!(
                             "cannot compare {left_ty} with {right_ty}"
@@ -323,10 +210,10 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     }
                     Ok(Type::Bool)
                 }
-                Some(Intrinsic::And | Intrinsic::Or) => {
+                (_, Some(PredicateOperator::Logical)) => {
                     for ty in [
-                        row_expression_type(arguments[0], scope)?,
-                        row_expression_type(arguments[1], scope)?,
+                        row_expression_type(arguments[0], scope, foreign)?,
+                        row_expression_type(arguments[1], scope, foreign)?,
                     ] {
                         if !matches!(ty, Type::Bool | Type::Any | Type::Variable(_)) {
                             return Err(TypeError::new(format!(
@@ -336,10 +223,10 @@ fn row_expression_type(expr: &Expr, scope: &HashMap<&str, &Row>) -> Result<Type,
                     }
                     Ok(Type::Bool)
                 }
-                Some(Intrinsic::Add | Intrinsic::Sub | Intrinsic::Mul | Intrinsic::Div | Intrinsic::Mod) => {
+                (_, Some(PredicateOperator::Arithmetic)) => {
                     for ty in [
-                        row_expression_type(arguments[0], scope)?,
-                        row_expression_type(arguments[1], scope)?,
+                        row_expression_type(arguments[0], scope, foreign)?,
+                        row_expression_type(arguments[1], scope, foreign)?,
                     ] {
                         if !matches!(ty, Type::Int | Type::Float | Type::Any | Type::Variable(_)) {
                             return Err(TypeError::new(format!(

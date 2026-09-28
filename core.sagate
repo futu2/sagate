@@ -1,0 +1,39 @@
+# Core prelude: backend declarations only.
+#
+# Every operation the SQL backend implements is declared here as a foreign
+# operation carrying an opaque id. The type checker treats each declaration
+# as an opaque function of its declared type, and the SQL backend maps the
+# id to its lowering function; names play no part in either. The public
+# language surface lives in the standard library prelude as ordinary Sagate.
+
+foreign sql __table : string -> string -> query r;
+foreign sql __where : (row r -> bool) -> query r -> query r;
+foreign sql __select : (row r -> row s) -> query r -> query s;
+foreign sql __mapKey : keymapper m -> query r -> query (mapkey m r);
+foreign sql __mapValue : valuemapper m -> query r -> query (mapvalue m r);
+foreign sql __merge : query r -> query s -> query (merge r s);
+foreign sql __agg : (row r -> row s) -> query r -> query s;
+foreign sql __joinInner : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
+foreign sql __joinLeft : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
+foreign sql __joinRight : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
+foreign sql __joinFull : query r -> (row l -> row r -> bool) -> query l -> query (merge r l);
+foreign sql __order : (row r -> list direction) -> query r -> query r;
+foreign sql __limit : int -> query r -> query r;
+foreign sql __asc : a -> direction;
+foreign sql __desc : a -> direction;
+foreign sql __snake : keymapper;
+foreign sql __kebab : keymapper;
+foreign sql __camel : keymapper;
+foreign sql __prefix : string -> keymapper;
+foreign sql __suffix : string -> keymapper;
+foreign sql __maybe : valuemapper;
+foreign sql __list : valuemapper;
+foreign sql __group : a -> group a;
+
+# Aggregate constructors carry their SQL expression templates. The backend
+# instantiates the template of the declared operation's binding.
+foreign sql __count : a -> agg int = sql "COUNT($1)";
+foreign sql __sum : a -> agg a = sql "SUM($1)";
+foreign sql __avg : a -> agg float = sql "AVG($1)";
+foreign sql __min : a -> agg a = sql "MIN($1)";
+foreign sql __max : a -> agg a = sql "MAX($1)";

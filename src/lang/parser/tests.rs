@@ -829,7 +829,7 @@ fn aggregate_constructor_uses_prelude_binding() {
 #[test]
 fn comparison_operator_uses_prelude_binding_in_predicates() {
     let program = parse(
-        "_==_ = left => right => __ne left right\n\
+        "_==_ = left => right => left != right\n\
              users : query { active = bool } = table \"public\" \"users\"\n\
              q = users & where (.active == true)\n\
              r = users & where (row => row.active == true)\n",
