@@ -8,8 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::lang::link_file;
-use crate::sql::{compile_linked_with_dialect, CompiledQuery};
+use crate::{compile_linked_with_dialect, CompiledQuery};
+use sagate_core::lang::link_file;
 
 /// A throwaway project directory that removes itself on drop.
 struct Project {
@@ -74,6 +74,9 @@ fn query<'a>(queries: &'a [CompiledQuery], name: &str) -> &'a CompiledQuery {
 
 fn project_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
 }
 
 /// The manual example from the module-system design document compiles to the

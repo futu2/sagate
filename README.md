@@ -227,26 +227,37 @@ Because each step keeps its position in the chain, `order` sorts at the step
 where it appears: place it last, or directly before `limit`, since an outer
 projection is free to reorder rows.
 
-Public functions and operators are defined in `prelude.sagate`. Scalar SQL
-functions use `sql` expression templates with positional placeholders; the
-compiler parses each template as a SQL expression and substitutes typed
-arguments before rendering the requested dialect:
+The prelude is split into two embedded layers. `core.sagate` declares only the
+backend operations as foreign operations carrying an opaque id — one
+declaration per relational operation, mapper, and aggregate constructor:
+
+```sagate
+foreign sql where : (row r -> bool) -> query r -> query r
+foreign sql count : a -> agg int = sql "COUNT($1)"
+```
+
+`prelude.sagate` is the standard library: the public surface written as
+ordinary Sagate over those declarations (`where = filter`-style wrappers, the
+overloaded operators, and combinators). Public functions and operators live
+there. Scalar SQL functions use `sql` expression templates with positional
+placeholders; the compiler parses each template as a SQL expression and
+substitutes typed arguments before rendering the requested dialect:
 
 ```sagate
 lower : string -> string = sql "LOWER($1)"
 between : int -> int -> int -> bool = sql "$1 BETWEEN $2 AND $3"
 ```
 
-The prelude defines arithmetic, comparison, boolean, and common string
-functions this way, along with the SQL calls for `count`, `sum`, `avg`, `min`,
-and `max`. For example, `lower(row.name)` can be used inside a projection.
-The Rust compiler retains the structural relational primitives (`table`,
-`where`, joins, and query transformations), which build the query AST and
-provide row typing. User bindings can override prelude definitions; the
-previous definition remains available within the overriding binding.
-Aggregate constructors can also be aliased or overridden through bindings.
-Predicates in `where` and joins accept full scalar expressions — fields,
-literals, comparisons, `&&`/`||`, and arithmetic.
+The SQL backend maps each foreign id to its lowering function, so names play
+no part in recognition: wrappers, aliases, and overrides all reach the same
+lowering through the declaration. The checker and compiler dispatch on the
+id; the structural row algebra (`merge`, `mapkey`, `mapvalue`) stays in the
+language core because it shapes inferred result types. User bindings can
+override prelude definitions; the previous definition remains available
+within the overriding binding. Aggregate constructors can also be aliased or
+overridden through bindings. Predicates in `where` and joins accept full
+scalar expressions — fields, literals, comparisons, `&&`/`||`, and
+arithmetic.
 
 `merge older newer` compiles to a cross join. If both rows contain a label,
 the newer row supplies the selected SQL expression and type:
@@ -355,23 +366,33 @@ rejects imports.
 
 ## Rust API
 
-The crate exposes source- and file-oriented compilation functions. The parser,
-checker, and SQL lowering modules remain internal implementation details:
+The repository is a Cargo workspace of three crates:
+
+- `sagate-core` — parser, AST, row-polymorphic type checker, module loader,
+  and the foreign-operation ABI. It depends only on `unicode-ident`, so
+  language front ends can use it without pulling in a SQL backend.
+- `sagate-sql` — relational IR, SQL lowering keyed on foreign ids, and
+  sqlglot rendering.
+- `sagate-cli` — the `sagate` command-line wrapper.
+
+The SQL crate exposes source- and file-oriented compilation functions; the
+compiler modules remain internal implementation details:
 
 ```rust
 // One anonymous module. Imports are rejected: there is no path to resolve
 // them against.
-let queries = sagate::compile_source_with_dialect(source, "postgres")?;
+let queries = sagate_sql::compile_source_with_dialect(source, "postgres")?;
 
 // A file plus its relative imports. Only the entry file's local queries
 // become standalone SQL.
-let queries = sagate::compile_file_with_dialect("report.sagate", "postgres")?;
+let queries = sagate_sql::compile_file_with_dialect("report.sagate", "postgres")?;
 
 for query in queries {
     println!("{}: {}", query.name, query.sql);
 }
 ```
 
-`compile_source` and `compile_file` use the ANSI dialect. The command-line
-binary is in `src/main.rs`; `flake.nix` provides the reproducible development
-shell and package.
+`compile_source` and `compile_file` use the ANSI dialect, and
+`compile_program` lowers an already-parsed `sagate_core` program. The command
+line lives in `crates/sagate-cli/src/main.rs`; `flake.nix` provides the
+reproducible development shell and package.

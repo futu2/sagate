@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::lang::{
+use sagate_core::lang::{
     aggregate_row_fields, flatten_apply, foreign_declarations, mapper_of, row_literal_fields,
     substitute, type_check, AggregateField, AggregateOp, Column, Expr, ForeignId, ForeignOps,
     Literal, Mapper, MapperAxis, OutputBinding, Program, Row,
@@ -61,7 +61,7 @@ pub(crate) fn compile_with_dialect(
 /// private dependencies), but only the entry file's locally defined queries
 /// are lowered to standalone SQL, reported under their original names.
 pub(crate) fn compile_linked_with_dialect(
-    linked: &crate::lang::LinkedProgram,
+    linked: &sagate_core::lang::LinkedProgram,
     dialect: &str,
 ) -> Result<Vec<CompiledQuery>, String> {
     let dialect = sqlglot_rust::Dialect::from_str(dialect)

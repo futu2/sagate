@@ -289,7 +289,7 @@ pub enum Kind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum MapperAxis {
+pub enum MapperAxis {
     Key,
     Value,
 }

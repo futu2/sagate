@@ -39,11 +39,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "sagate"
+name = "sagate-cli"
 version = "0.1.0"
 dependencies = [
- "sqlglot-rust",
+ "sagate-sql",
+]
+
+[[package]]
+name = "sagate-core"
+version = "0.1.0"
+dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "sagate-sql"
+version = "0.1.0"
+dependencies = [
+ "sagate-core",
+ "sqlglot-rust",
 ]
 
 [[package]]

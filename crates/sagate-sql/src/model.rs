@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::lang::Row;
+use sagate_core::lang::Row;
 use sqlglot_rust::ast::{Cte, Statement};
 
 #[derive(Clone, Debug, PartialEq)]

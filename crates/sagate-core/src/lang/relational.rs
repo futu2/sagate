@@ -9,15 +9,15 @@
 
 use std::collections::HashMap;
 
-use super::ast::{Binding, Expr, Mapper, MapperAxis, Row, Type};
 use super::ast::Literal;
+use super::ast::{Binding, Expr, Mapper, MapperAxis, Row, Type};
 use super::checker::{flatten_apply, substitute};
 
 /// The backend operation a declaration lowers to. The id is the only handle
 /// the compiler pipeline keeps: names can be rebound, aliased, or overridden
 /// without changing how an application is recognized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ForeignId {
+pub enum ForeignId {
     Table,
     Where,
     Select,
@@ -87,7 +87,7 @@ impl ForeignId {
         })
     }
 
-    pub(crate) fn is_join(self) -> bool {
+    pub fn is_join(self) -> bool {
         matches!(
             self,
             Self::JoinInner | Self::JoinLeft | Self::JoinRight | Self::JoinFull
@@ -97,9 +97,9 @@ impl ForeignId {
 
 /// Foreign declarations of one program, keyed by binding symbol. The checker
 /// and the SQL backend build this once per compilation and dispatch on it.
-pub(crate) type ForeignOps = HashMap<String, ForeignId>;
+pub type ForeignOps = HashMap<String, ForeignId>;
 
-pub(crate) fn foreign_declarations(bindings: &[Binding]) -> ForeignOps {
+pub fn foreign_declarations(bindings: &[Binding]) -> ForeignOps {
     bindings
         .iter()
         .filter_map(|binding| binding.foreign.map(|id| (binding.name.clone(), id)))
@@ -110,16 +110,16 @@ pub(crate) fn foreign_declarations(bindings: &[Binding]) -> ForeignOps {
 /// backend passes the program's bindings so aliased constructors can be
 /// chased; the checker inspects already-expanded expressions and passes an
 /// empty table.
-pub(crate) type Definitions<'a> = HashMap<String, &'a Expr>;
+pub type Definitions<'a> = HashMap<String, &'a Expr>;
 
-pub(crate) fn no_definitions() -> Definitions<'static> {
+pub fn no_definitions() -> Definitions<'static> {
     HashMap::new()
 }
 
 /// Combine rows for a join, marking columns from an outer-joined side as
 /// nullable. This backend rule stays alongside the join metadata instead of
 /// becoming part of the syntax tree's row model.
-pub(crate) fn join_row(left: &Row, right: &Row, kind: ForeignId) -> Row {
+pub fn join_row(left: &Row, right: &Row, kind: ForeignId) -> Row {
     let mut row = right.merge(left);
     let nullable_left = matches!(kind, ForeignId::JoinRight | ForeignId::JoinFull);
     let nullable_right = matches!(kind, ForeignId::JoinLeft | ForeignId::JoinFull);
@@ -135,7 +135,7 @@ pub(crate) fn join_row(left: &Row, right: &Row, kind: ForeignId) -> Row {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum AggregateOp {
+pub enum AggregateOp {
     Group,
     Count,
     Sum,
@@ -147,17 +147,17 @@ pub(crate) enum AggregateOp {
 /// One extracted aggregate column: `{total = sum .total}` contributes
 /// `(total, Sum, Some("total"))`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct AggregateField {
-    pub(crate) alias: String,
-    pub(crate) operation: AggregateOp,
-    pub(crate) function: Option<String>,
-    pub(crate) field: Option<String>,
+pub struct AggregateField {
+    pub alias: String,
+    pub operation: AggregateOp,
+    pub function: Option<String>,
+    pub field: Option<String>,
 }
 
 /// The row literal behind a select projection or aggregate projection:
 /// either the literal itself or a single-row lambda whose body is one. The
 /// lambda parameter names the row its field expressions read from.
-pub(crate) fn row_literal_fields(expr: &Expr) -> Option<(&str, &Vec<(String, Expr)>)> {
+pub fn row_literal_fields(expr: &Expr) -> Option<(&str, &Vec<(String, Expr)>)> {
     match expr {
         Expr::RowLiteral(fields) => Some(("row", fields)),
         Expr::Annotated { expr, .. } => row_literal_fields(expr),
@@ -172,7 +172,7 @@ pub(crate) fn row_literal_fields(expr: &Expr) -> Option<(&str, &Vec<(String, Exp
 /// Extract aggregate columns from an `agg` row literal: each value must be
 /// an aggregate constructor application (`group .user_id`, `sum .total`,
 /// `count`). Returns `None` when the expression is not a row literal.
-pub(crate) fn aggregate_row_fields(
+pub fn aggregate_row_fields(
     expr: &Expr,
     definitions: &Definitions,
     foreign: &ForeignOps,
@@ -245,7 +245,9 @@ fn aggregate_key(
                 Some(ForeignId::Max) => AggregateOp::Max,
                 _ => return Err(format!("unknown aggregate '{name}'")),
             };
-            let field = arguments.first().and_then(|argument| field_name_of(argument));
+            let field = arguments
+                .first()
+                .and_then(|argument| field_name_of(argument));
             // The function keeps the terminal binding symbol so the SQL
             // backend can find that binding's template body.
             let function = (!matches!(operation, AggregateOp::Group)).then(|| name.clone());
@@ -285,7 +287,7 @@ fn declared_operation(symbol: &str) -> Option<ForeignId> {
 /// expression is matched structurally: identity lambdas, parameterized
 /// prefix/suffix applications, and declared mapper operations. Aliased
 /// mappers chase through their definitions.
-pub(crate) fn mapper_of(
+pub fn mapper_of(
     expr: &Expr,
     definitions: &Definitions,
     foreign: &ForeignOps,
@@ -300,9 +302,7 @@ pub(crate) fn mapper_of(
         }
     };
     match expr {
-        Expr::Lambda { param, body, .. }
-            if matches!(body.as_ref(), Expr::Var(name) if name == param) =>
-        {
+        Expr::Lambda { param, body, .. } if matches!(body.as_ref(), Expr::Var(name) if name == param) => {
             Ok(Mapper::Identity)
         }
         // Chase bindings to their primitive head; declared foreign

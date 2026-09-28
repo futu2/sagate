@@ -23,12 +23,12 @@ fn main() -> ExitCode {
                 eprintln!("sagate: cannot read stdin: {error}");
                 return ExitCode::from(1);
             }
-            sagate::compile_source_with_dialect(&input, dialect)
+            sagate_sql::compile_source_with_dialect(&input, dialect)
         }
         Some(path) => {
             // A file path compiles through the module loader, which follows
             // relative imports from the file's directory.
-            sagate::compile_file_with_dialect(path, dialect)
+            sagate_sql::compile_file_with_dialect(path, dialect)
         }
     };
 

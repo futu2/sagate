@@ -1,20 +1,21 @@
-[package]
-name = "sagate"
+[workspace]
+resolver = "2"
+members = [
+    "crates/sagate-core",
+    "crates/sagate-sql",
+    "crates/sagate-cli",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "A row-polymorphic language compiler for SQL"
 license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
+sagate-core = { path = "crates/sagate-core", version = "0.1.0" }
+sagate-sql = { path = "crates/sagate-sql", version = "0.1.0" }
 sqlglot-rust = "0.10.30"
 unicode-ident = "1"
-
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "sagate"
-path = "src/main.rs"
 
 [profile.release]
 lto = true

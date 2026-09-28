@@ -180,13 +180,13 @@ fn compile_select(
 /// The static type of a projection value. Field references keep their column
 /// type; computed values are refined by the checker's known rows for the
 /// final binding, so `Any` is enough for mid-chain field-existence checks.
-fn projection_field_type(value: &Expr, row: &Row) -> crate::lang::Type {
+fn projection_field_type(value: &Expr, row: &Row) -> sagate_core::lang::Type {
     match value {
         Expr::Field(field) | Expr::Access { field, .. } => row
             .field(field)
-            .map_or(crate::lang::Type::Any, |column| column.ty.clone()),
+            .map_or(sagate_core::lang::Type::Any, |column| column.ty.clone()),
         Expr::Lambda { body, .. } => projection_field_type(body, row),
-        _ => crate::lang::Type::Any,
+        _ => sagate_core::lang::Type::Any,
     }
 }
 
@@ -244,13 +244,13 @@ fn compile_aggregate(
         };
         selections.push(select_expr(expression, Some(field.alias.clone())));
         let ty = match &field.operation {
-            AggregateOp::Count => crate::lang::Type::Int,
-            AggregateOp::Avg => crate::lang::Type::Float,
+            AggregateOp::Count => sagate_core::lang::Type::Int,
+            AggregateOp::Avg => sagate_core::lang::Type::Float,
             AggregateOp::Group | AggregateOp::Sum | AggregateOp::Min | AggregateOp::Max => field
                 .field
                 .as_deref()
                 .and_then(|name| inner_row.field(name))
-                .map_or(crate::lang::Type::Any, |column| column.ty.clone()),
+                .map_or(sagate_core::lang::Type::Any, |column| column.ty.clone()),
         };
         columns.push(Column {
             name: field.alias.clone(),
@@ -279,7 +279,7 @@ fn compile_join(
     kind: ForeignId,
     counter: &mut u32,
 ) -> Result<Relation, CompileError> {
-    let row = crate::lang::join_row(&left.row, &right.row, kind);
+    let row = sagate_core::lang::join_row(&left.row, &right.row, kind);
     let selections = if row.columns.is_empty() {
         vec![
             SelectItem::QualifiedWildcard {

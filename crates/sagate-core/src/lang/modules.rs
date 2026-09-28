@@ -17,9 +17,9 @@ use super::parser::{parse_module, prelude_source_name, resolved_prelude_bindings
 
 /// One SQL output of a compilation: the internal binding symbol together with
 /// the source-facing name the result is reported under.
-pub(crate) struct OutputBinding {
-    pub(crate) symbol: String,
-    pub(crate) name: String,
+pub struct OutputBinding {
+    pub symbol: String,
+    pub name: String,
 }
 
 /// One module record retained for diagnostics: its source-facing display name
@@ -34,15 +34,15 @@ pub(crate) struct Origin {
     pub(crate) module: usize,
     pub(crate) file: String,
     pub(crate) line: usize,
-    pub(crate) name: String,
+    pub name: String,
 }
 
 /// A linked compilation: the flat program the checker consumes, the entry
 /// bindings whose queries become SQL outputs, and the origin metadata that
 /// keeps diagnostics source-facing.
-pub(crate) struct LinkedProgram {
-    pub(crate) program: Program,
-    pub(crate) outputs: Vec<OutputBinding>,
+pub struct LinkedProgram {
+    pub program: Program,
+    pub outputs: Vec<OutputBinding>,
     pub(crate) origins: HashMap<String, Origin>,
     pub(crate) chain: Vec<ChainModule>,
 }
@@ -50,7 +50,7 @@ pub(crate) struct LinkedProgram {
 impl LinkedProgram {
     /// Wrap a checker failure so a dependency error names its import chain,
     /// and rewrite internal symbols back to the spellings a user wrote.
-    pub(crate) fn wrap_error(&self, error: TypeError) -> String {
+    pub fn wrap_error(&self, error: TypeError) -> String {
         let mut message = error.to_string();
         if let Some(name) = error.definition() {
             if let Some(origin) = self.origins.get(name) {
@@ -112,7 +112,7 @@ struct Loader {
 /// so dependencies always precede their importers and a diamond dependency is
 /// loaded once. Module identity is the canonical path, which deduplicates `..`
 /// segments and symbolic links.
-pub(crate) fn link_file(entry: &Path) -> Result<LinkedProgram, String> {
+pub fn link_file(entry: &Path) -> Result<LinkedProgram, String> {
     let written = entry.display().to_string();
     let mut loader = Loader {
         modules: Vec::new(),

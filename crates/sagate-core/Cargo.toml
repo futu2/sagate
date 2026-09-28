@@ -1,0 +1,9 @@
+[package]
+name = "sagate-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sagate language core: parser, row-polymorphic type checker, modules, and the foreign-operation ABI"
+
+[dependencies]
+unicode-ident.workspace = true

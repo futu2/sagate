@@ -38,8 +38,7 @@ pub(super) fn prelude_source_name(symbol: &str) -> &str {
 
 /// The embedded core prelude: backend declarations only. It is the one
 /// source allowed to spell foreign primitives directly.
-const CORE_PRELUDE_SOURCE: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/core.sagate"));
+const CORE_PRELUDE_SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/core.sagate"));
 
 /// The embedded standard library: the public language surface, written as
 /// ordinary Sagate over the core declarations.

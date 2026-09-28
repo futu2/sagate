@@ -1,0 +1,13 @@
+[package]
+name = "sagate-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line compiler for the Sagate language"
+
+[[bin]]
+name = "sagate"
+path = "src/main.rs"
+
+[dependencies]
+sagate-sql.workspace = true

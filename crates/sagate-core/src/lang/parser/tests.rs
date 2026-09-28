@@ -162,12 +162,6 @@ fn application_and_composition_operators_are_available() {
     let rows = type_check(&program).expect("type check");
     assert_eq!(rows["q"].field("id").unwrap().ty, Type::Int);
     assert_eq!(rows["q2"].field("id").unwrap().ty, Type::Int);
-    let compiled = crate::sql::compile(&program).expect("compile");
-    let q = compiled.iter().find(|query| query.name == "q").unwrap();
-    assert!(q.sql.contains("q.\"active\" = TRUE"));
-    assert!(q.sql.contains("q.\"id\" AS \"id\""));
-    let q2 = compiled.iter().find(|query| query.name == "q2").unwrap();
-    assert!(q2.sql.contains("q.\"active\" = TRUE"));
 }
 
 #[test]
@@ -647,29 +641,6 @@ fn polymorphic_definitions_are_instantiated_per_use() {
 }
 
 #[test]
-fn comparison_operators_are_function_applications_and_sql_predicates() {
-    let program = parse(
-        "users : query { active = bool } = table \"public\" \"users\"\n\
-             is_active = row : { active = bool } => row.active == true\n\
-             q = users & where is_active\n",
-    )
-    .expect("parse");
-    let is_active = program
-        .bindings
-        .iter()
-        .find(|binding| binding.name == "is_active")
-        .expect("predicate binding");
-    let Expr::Lambda { body, .. } = &is_active.expr else {
-        panic!("expected a lambda")
-    };
-    assert!(matches!(body.as_ref(), Expr::Apply { .. }));
-    type_check(&program).expect("type check");
-    let compiled = crate::sql::compile(&program).expect("compile");
-    let q = compiled.iter().find(|query| query.name == "q").unwrap();
-    assert!(q.sql.contains("q.\"active\" = TRUE"));
-}
-
-#[test]
 fn local_and_multicharacter_operator_sections_are_supported() {
     let program = parse("value = let _++_ = x => y => x in _++_ 1 2\n").expect("parse");
     type_check(&program).expect("type check");
@@ -776,91 +747,6 @@ fn join_checks_key_types_and_outer_join_nullability() {
     )
     .expect("parse");
     assert!(type_check(&bad).is_err());
-}
-
-#[test]
-fn prelude_override_controls_relation_semantics() {
-    let program = parse(
-        "users : query { id = int, active = bool } = table \"public\" \"users\"\n\
-             select = projection => relation => __where (.active == true) relation\n\
-             q = users & select { id = .id }\n",
-    )
-    .expect("parse");
-    let rows = type_check(&program).expect("type check");
-    assert!(rows["q"].field("active").is_some());
-    let queries = crate::sql::compile(&program).expect("compile");
-    let query = queries.iter().find(|query| query.name == "q").unwrap();
-    assert!(query.sql.contains("q.\"active\" = TRUE"));
-}
-
-#[test]
-fn user_alias_can_take_an_aggregate_projection() {
-    let program = parse(
-        "users : query { id = int } = table \"public\" \"users\"\n\
-             summarize = agg\n\
-             q = users & summarize { rows = count }\n",
-    )
-    .expect("parse");
-    let rows = type_check(&program).expect("type check");
-    assert_eq!(rows["q"].field("rows").unwrap().ty, Type::Int);
-    let queries = crate::sql::compile(&program).expect("compile");
-    let query = queries.iter().find(|query| query.name == "q").unwrap();
-    assert!(query.sql.contains("COUNT(*)"));
-}
-
-#[test]
-fn aggregate_constructor_uses_prelude_binding() {
-    let program = parse(
-        "users : query { id = int } = table \"public\" \"users\"\n\
-             sum = field => __count field\n\
-             countRows = count\n\
-             q = users & agg { rows = sum .id, all_rows = countRows }\n",
-    )
-    .expect("parse");
-    let rows = type_check(&program).expect("type check");
-    assert_eq!(rows["q"].field("rows").unwrap().ty, Type::Int);
-    assert_eq!(rows["q"].field("all_rows").unwrap().ty, Type::Int);
-    let queries = crate::sql::compile(&program).expect("compile");
-    let query = queries.iter().find(|query| query.name == "q").unwrap();
-    assert!(query.sql.contains("COUNT(q.\"id\") AS \"rows\""));
-    assert!(query.sql.contains("COUNT(*) AS \"all_rows\""));
-}
-
-#[test]
-fn comparison_operator_uses_prelude_binding_in_predicates() {
-    let program = parse(
-        "_==_ = left => right => left != right\n\
-             users : query { active = bool } = table \"public\" \"users\"\n\
-             q = users & where (.active == true)\n\
-             r = users & where (row => row.active == true)\n",
-    )
-    .expect("parse");
-    type_check(&program).expect("type check");
-    let queries = crate::sql::compile(&program).expect("compile");
-    for name in ["q", "r"] {
-        let query = queries.iter().find(|query| query.name == name).unwrap();
-        assert!(query.sql.contains("q.\"active\" <> TRUE"));
-    }
-}
-
-#[test]
-fn mapper_constructors_are_prelude_functions() {
-    let program = parse(
-        "users : query { id = int } = table \"public\" \"users\"\n\
-             q = users & mapKey (prefix \"user_\")\n\
-             r = users & mapKey(suffix(\"_column\"))\n",
-    )
-    .expect("parse");
-    let rows = type_check(&program).expect("type check");
-    assert!(rows["q"].field("user_id").is_some());
-    assert!(rows["r"].field("id_column").is_some());
-    let queries = crate::sql::compile(&program).expect("compile");
-    assert!(queries
-        .iter()
-        .any(|query| query.sql.contains("AS \"user_id\"")));
-    assert!(queries
-        .iter()
-        .any(|query| query.sql.contains("AS \"id_column\"")));
 }
 
 #[test]

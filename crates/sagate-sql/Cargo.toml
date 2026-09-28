@@ -1,0 +1,10 @@
+[package]
+name = "sagate-sql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQL backend for Sagate: relational IR, lowering, and sqlglot rendering"
+
+[dependencies]
+sagate-core.workspace = true
+sqlglot-rust.workspace = true
